@@ -1,0 +1,253 @@
+/*
+  Do NOT add @import url("https://...") for Google Fonts here. After Tailwind
+  expands, those imports would land after other rules and fail parsing.
+  Load icon fonts via <link> in app/layout.tsx instead.
+*/
+@import 'tailwindcss';
+@import 'tw-animate-css';
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  /* SNF Tracker Color System */
+  --surface: #f7f9fe;
+  --surface-dim: #ccdceb;
+  --surface-variant: #d7e4f1;
+  --surface-container: #e7eff8;
+  --surface-container-low: #eff4fb;
+  --surface-container-high: #dfe9f4;
+  --surface-container-highest: #d7e4f1;
+  --surface-container-lowest: #ffffff;
+  
+  --primary: #005db6;
+  --primary-dim: #0051a1;
+  --primary-container: #d6e3ff;
+  --on-primary: #f6f7ff;
+  --on-primary-container: #00519f;
+  
+  --secondary: #4b6175;
+  --secondary-dim: #3f5569;
+  --secondary-container: #cee5fd;
+  --on-secondary: #f6f9ff;
+  --on-secondary-container: #3e5468;
+  
+  --tertiary: #006b68;
+  --tertiary-dim: #005d5b;
+  --tertiary-container: #94f3ee;
+  --on-tertiary: #e1fffd;
+  --on-tertiary-container: #005c5a;
+  
+  --error: #9f403d;
+  --error-dim: #4e0309;
+  --error-container: #fe8983;
+  --on-error: #fff7f6;
+  --on-error-container: #752121;
+  
+  --on-surface: #27343e;
+  --on-surface-variant: #54616c;
+  --on-background: #27343e;
+  --background: #f7f9fe;
+  
+  --outline: #6f7c88;
+  --outline-variant: #a6b4c0;
+  
+  /* Standard tokens */
+  --foreground: #27343e;
+  --card: #ffffff;
+  --card-foreground: #27343e;
+  --popover: #ffffff;
+  --popover-foreground: #27343e;
+  --primary-foreground: #f6f7ff;
+  --secondary-foreground: #f6f9ff;
+  --muted: #eff4fb;
+  --muted-foreground: #54616c;
+  --accent: #d6e3ff;
+  --accent-foreground: #00519f;
+  --destructive: #9f403d;
+  --destructive-foreground: #fff7f6;
+  --border: #d7e4f1;
+  --input: #d7e4f1;
+  --ring: #005db6;
+  --radius: 0.625rem;
+  
+  --sidebar: #f8fafc;
+  --sidebar-foreground: #27343e;
+  --sidebar-primary: #005db6;
+  --sidebar-primary-foreground: #f6f7ff;
+  --sidebar-accent: #eff4fb;
+  --sidebar-accent-foreground: #27343e;
+  --sidebar-border: #e2e8f0;
+  --sidebar-ring: #005db6;
+}
+
+.dark {
+  --surface: #0f172a;
+  --surface-dim: #1e293b;
+  --surface-variant: #334155;
+  --surface-container: #1e293b;
+  --surface-container-low: #0f172a;
+  --surface-container-high: #334155;
+  --surface-container-highest: #475569;
+  --surface-container-lowest: #020617;
+  
+  --primary: #609efc;
+  --primary-dim: #3b82f6;
+  --primary-container: #1e3a5f;
+  --on-primary: #0f172a;
+  --on-primary-container: #bfdbfe;
+  
+  --on-surface: #e2e8f0;
+  --on-surface-variant: #94a3b8;
+  --on-background: #e2e8f0;
+  --background: #0f172a;
+  
+  --foreground: #e2e8f0;
+  --card: #1e293b;
+  --card-foreground: #e2e8f0;
+  --popover: #1e293b;
+  --popover-foreground: #e2e8f0;
+  --primary-foreground: #0f172a;
+  --secondary-foreground: #e2e8f0;
+  --muted: #334155;
+  --muted-foreground: #94a3b8;
+  --accent: #1e3a5f;
+  --accent-foreground: #bfdbfe;
+  --border: #334155;
+  --input: #334155;
+  --ring: #609efc;
+  
+  --sidebar: #0f172a;
+  --sidebar-foreground: #e2e8f0;
+  --sidebar-primary: #609efc;
+  --sidebar-primary-foreground: #0f172a;
+  --sidebar-accent: #1e293b;
+  --sidebar-accent-foreground: #e2e8f0;
+  --sidebar-border: #334155;
+  --sidebar-ring: #609efc;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), 'Inter', system-ui, sans-serif;
+  --font-headline: var(--font-manrope), 'Manrope', sans-serif;
+  --font-mono: 'Geist Mono', monospace;
+  
+  /* Surface colors */
+  --color-surface: var(--surface);
+  --color-surface-dim: var(--surface-dim);
+  --color-surface-variant: var(--surface-variant);
+  --color-surface-container: var(--surface-container);
+  --color-surface-container-low: var(--surface-container-low);
+  --color-surface-container-high: var(--surface-container-high);
+  --color-surface-container-highest: var(--surface-container-highest);
+  --color-surface-container-lowest: var(--surface-container-lowest);
+  
+  /* Primary colors */
+  --color-primary: var(--primary);
+  --color-primary-dim: var(--primary-dim);
+  --color-primary-container: var(--primary-container);
+  --color-on-primary: var(--on-primary);
+  --color-on-primary-container: var(--on-primary-container);
+  --color-primary-foreground: var(--primary-foreground);
+  
+  /* Secondary colors */
+  --color-secondary: var(--secondary);
+  --color-secondary-dim: var(--secondary-dim);
+  --color-secondary-container: var(--secondary-container);
+  --color-on-secondary: var(--on-secondary);
+  --color-on-secondary-container: var(--on-secondary-container);
+  --color-secondary-foreground: var(--secondary-foreground);
+  
+  /* Tertiary colors */
+  --color-tertiary: var(--tertiary);
+  --color-tertiary-dim: var(--tertiary-dim);
+  --color-tertiary-container: var(--tertiary-container);
+  --color-on-tertiary: var(--on-tertiary);
+  --color-on-tertiary-container: var(--on-tertiary-container);
+  
+  /* Error colors */
+  --color-error: var(--error);
+  --color-error-dim: var(--error-dim);
+  --color-error-container: var(--error-container);
+  --color-on-error: var(--on-error);
+  --color-on-error-container: var(--on-error-container);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  
+  /* Text colors */
+  --color-on-surface: var(--on-surface);
+  --color-on-surface-variant: var(--on-surface-variant);
+  --color-on-background: var(--on-background);
+  
+  /* Standard tokens */
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  
+  /* Outline colors */
+  --color-outline: var(--outline);
+  --color-outline-variant: var(--outline-variant);
+  
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --radius-2xl: calc(var(--radius) + 8px);
+  --radius-3xl: calc(var(--radius) + 16px);
+  
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+}
+
+/* Google Material Symbols (loaded in app/admin/layout.tsx) */
+/* Resident detail sheet: main column + 380px sidebar (matches design mock) */
+.asymmetric-grid-detail {
+  display: grid;
+  grid-template-columns: 1fr 380px;
+  gap: 1.5rem;
+}
+@media (max-width: 1024px) {
+  .asymmetric-grid-detail {
+    grid-template-columns: 1fr;
+  }
+}
+
+.material-symbols-outlined {
+  font-family: "Material Symbols Outlined";
+  font-weight: normal;
+  font-style: normal;
+  line-height: 1;
+  letter-spacing: normal;
+  text-transform: none;
+  display: inline-block;
+  white-space: nowrap;
+  word-wrap: normal;
+  direction: ltr;
+  font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
+  vertical-align: middle;
+}
