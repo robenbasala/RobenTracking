@@ -1,16 +1,20 @@
 /**
  * Grid SQL driven by dbo.FieldMetadata (Main screen).
- * Base fields → PendingTrackingItem; custom → TrackingItemFieldValues + FieldMetadataOption.
+ * Base fields → TrackingItemsTbl; custom → TrackingItemFieldValues + FieldMetadataOption.
  */
 import sql from "mssql"
 import type { ConnectionPool } from "mssql"
-import type { FieldMetadataRow } from "./field-metadata"
 import {
   SCREEN_MAIN,
   TRACKING_ITEM_ID_FIELD_NAME,
   isCalculatedField,
   loadFieldMetadataForScreen,
+  type FieldMetadataRow,
 } from "./field-metadata"
+import {
+  SQL_FILTER_FACILITY_LIST_TI,
+  sanitizeFacilityIdsForCsv,
+} from "./facility-query.js"
 import { gridColumnTitleFromFieldMetadata } from "./formatters"
 import type { GridColumnMeta, GridColumnType } from "./types"
 
@@ -65,7 +69,7 @@ function pascalToCamelKey(fieldName: string): string {
   return fieldName.charAt(0).toLowerCase() + fieldName.slice(1)
 }
 
-/** Primary key on PendingTrackingItem — always loaded for rows but not shown as a configurable column. */
+/** Primary key on TrackingItemsTbl — always loaded for rows but not shown as a configurable column. */
 export const CORE_TRACKING_ITEM_ID_FIELD = "TrackingItemId"
 
 function fieldOpensResidentDetail(fieldName: string): boolean {
@@ -124,16 +128,220 @@ function customResolvedExpression(dataType: string): string {
 
 export type GridQueryParams = {
   companyId: number
+  /** Tab / report key; passed to dbo.fn_PendingTracking_ReportEligibleItems as @reportKey. */
   viewType: string
   /** US state (2-letter), optional — filters FieldMetadataState when set. */
   state: string | null
   search: string | null
-  facilityId: string | null
+  /** Empty = no facility restriction (all). */
+  facilityIds: string[]
   status: string | null
   page: number
   pageSize: number
   sortBy: string
   sortDirection: "asc" | "desc"
+  /** When true, include rows where TrackingItemsTbl.IsActive = 0. */
+  includeInactive?: boolean
+}
+
+/**
+ * Same row filter as dbo.trk_PendingTracking_ReportSelect (via dbo.fn_PendingTracking_ReportEligibleItems).
+ * Deploy sql/012-pending-tracking-report-eligible-items.sql (after 010) so this object exists.
+ */
+const SQL_REPORT_ELIGIBLE_JOIN_TI = `
+  INNER JOIN dbo.fn_PendingTracking_ReportEligibleItems(
+    @reportKey, @companyId, @facilityIdList, @status, @search, @includeInactive
+  ) rep ON rep.TrackingItemId = ti.TrackingItemId`
+
+function activeRowFilterSql(includeInactive: boolean | undefined): string {
+  if (includeInactive) return ""
+  return "ti.IsActive = 1\n    AND "
+}
+
+/**
+ * True if dbo.fn_PendingTracking_ReportEligibleItems exists (sql/012).
+ * Not cached: after deploying SQL, the next grid request must see the object without API restart.
+ */
+export async function hasReportEligibleItemsTvf(
+  pool: ConnectionPool
+): Promise<boolean> {
+  try {
+    const r = await pool.request().query(`
+      SELECT 1 AS x FROM sys.objects
+      WHERE object_id = OBJECT_ID(N'dbo.fn_PendingTracking_ReportEligibleItems')
+        AND type IN (N'IF', N'TF')
+    `)
+    return r.recordset.length > 0
+  } catch {
+    return false
+  }
+}
+
+/** @deprecated No-op — detection is no longer cached. */
+export function resetReportEligibleItemsTvfCache(): void {}
+
+/**
+ * True if dbo.trk_PendingTracking_ReportSelectItemIds exists (sql/012).
+ * Not cached — deploy 012 and the grid can use INSERT…EXEC on the next request.
+ */
+export async function hasReportSelectItemIdsProcedure(
+  pool: ConnectionPool
+): Promise<boolean> {
+  try {
+    const r = await pool.request().query(`
+      SELECT 1 AS x FROM sys.objects
+      WHERE object_id = OBJECT_ID(N'dbo.trk_PendingTracking_ReportSelectItemIds')
+        AND type = N'P'
+    `)
+    return r.recordset.length > 0
+  } catch {
+    return false
+  }
+}
+
+/** @deprecated No-op — detection is no longer cached. */
+export function resetReportSelectItemIdsProcedureCache(): void {}
+
+/**
+ * When true (default), the pending-tracking grid uses a batch that runs
+ * dbo.trk_PendingTracking_ReportSelectItemIds via INSERT…EXEC (requires 012 on the DB).
+ * Set TRACKING_GRID_USE_REPORT_ITEM_IDS_PROC=0 to force the TVF JOIN / legacy SQL path instead.
+ */
+export function useReportItemIdsProcedureForGrid(): boolean {
+  const v = process.env.TRACKING_GRID_USE_REPORT_ITEM_IDS_PROC?.trim().toLowerCase()
+  return v !== "0" && v !== "false" && v !== "no"
+}
+
+type GridReportFilterMode = "tvf" | "legacy" | "tempIds"
+
+function buildGridPagedSelectSql(
+  fields: FieldMetadataRow[],
+  params: GridQueryParams,
+  includeHotCase: boolean,
+  filterMode: GridReportFilterMode
+): { sql: string; orderByColumn: string } {
+  const fieldSelect = buildFieldSelectFragments(fields)
+  const hasCustom = fields.some(
+    (f) => f.SourceType === "Custom" && !isCalculatedField(f)
+  )
+  const sortCol = validateSortColumnPascal(params.sortBy, fields)
+  const orderByColumn = sortCol
+
+  const tfvJoin = hasCustom
+    ? `LEFT JOIN dbo.TrackingItemFieldValues tfv ON tfv.TrackingItemId = ti.TrackingItemId
+  LEFT JOIN dbo.FieldMetadataOption opt ON opt.FieldOptionId = tfv.DropdownOptionId
+    AND opt.FieldMetadataId = tfv.FieldMetadataId`
+    : ""
+
+  const rowStateSql = `MAX(CAST(ISNULL(ti.IsActive, 1) AS INT)) AS [IsActive],
+    MAX(ti.StoppedAt) AS [StoppedAt],
+    MAX(ti.StoppedBy) AS [StoppedBy]`
+
+  const selectParts: string[] = ["ti.TrackingItemId"]
+  if (includeHotCase) {
+    selectParts.push(
+      "MAX(CAST(ISNULL(ti.IsHotCase, 0) AS INT)) AS [IsHotCase]"
+    )
+  }
+  selectParts.push(rowStateSql)
+  if (fieldSelect) selectParts.push(fieldSelect)
+  const selectList = selectParts.join(",\n    ")
+
+  let reportFilterJoin = ""
+  let reportFilterWhere = ""
+  if (filterMode === "tvf") {
+    reportFilterJoin = SQL_REPORT_ELIGIBLE_JOIN_TI
+  } else if (filterMode === "legacy") {
+    reportFilterWhere = `
+  WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+    AND dbo.fn_PendingTracking_MatchesReport(@reportKey, ti.PayerType, ti.PayerName, ti.ViewType) = 1
+    ${SQL_FILTER_FACILITY_LIST_TI}
+    AND (@status IS NULL OR @status = N'' OR ti.Status = @status)
+    AND (
+      @search IS NULL OR @search = N'' OR ti.ResidentName LIKE N'%' + @search + N'%'
+    )`
+  } else {
+    reportFilterJoin = `
+  INNER JOIN #rt_report_ids rt ON rt.TrackingItemId = ti.TrackingItemId`
+  }
+
+  const sql = `
+;WITH Grid AS (
+  SELECT
+    ${selectList}
+  FROM dbo.TrackingItemsTbl ti
+  ${reportFilterJoin}
+  ${tfvJoin}
+  ${reportFilterWhere}
+  GROUP BY ti.TrackingItemId
+)
+SELECT *
+FROM Grid
+ORDER BY ${orderByColumn} ${params.sortDirection === "desc" ? "DESC" : "ASC"}
+OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
+`
+
+  return { sql, orderByColumn }
+}
+
+/**
+ * Single batch: fill #rt_report_ids via INSERT…EXEC dbo.trk_PendingTracking_ReportSelectItemIds,
+ * COUNT(*), then FieldMetadata aggregation CTE (same as grid) restricted to those ids.
+ */
+export function buildGridPagedBatchViaReportItemIdsProc(
+  fields: FieldMetadataRow[],
+  params: GridQueryParams,
+  includeHotCase: boolean
+): string {
+  const { sql: innerSelect } = buildGridPagedSelectSql(
+    fields,
+    params,
+    includeHotCase,
+    "tempIds"
+  )
+  return `
+SET NOCOUNT ON;
+IF OBJECT_ID(N'tempdb..#rt_report_ids') IS NOT NULL DROP TABLE #rt_report_ids;
+CREATE TABLE #rt_report_ids (TrackingItemId INT NOT NULL PRIMARY KEY);
+INSERT INTO #rt_report_ids (TrackingItemId)
+EXEC dbo.trk_PendingTracking_ReportSelectItemIds
+  @ReportType = @reportKey,
+  @CompanyId = @companyId,
+  @FacilityId = NULL,
+  @FacilityIdList = @facilityIdList,
+  @Status = @status,
+  @Search = @search,
+  @IncludeInactive = @includeInactive;
+
+SELECT COUNT(*) AS TotalCount FROM #rt_report_ids;
+${innerSelect}
+IF OBJECT_ID(N'tempdb..#rt_report_ids') IS NOT NULL DROP TABLE #rt_report_ids;
+`
+}
+
+/** Parse recordsets from buildGridPagedBatchViaReportItemIdsProc (COUNT then grid rows). */
+export function parseGridPagedBatchRecordsets(
+  recordsets: Record<string, unknown>[][]
+): { totalCount: number; rows: Record<string, unknown>[] } {
+  let totalCount = 0
+  let rows: Record<string, unknown>[] = []
+  for (const rs of recordsets) {
+    if (!rs || rs.length === 0) continue
+    const first = rs[0] as Record<string, unknown>
+    const keys = first ? Object.keys(first) : []
+    const isTotalCountRow =
+      keys.length === 1 &&
+      keys[0] === "TotalCount" &&
+      Object.prototype.hasOwnProperty.call(first, "TotalCount")
+    if (first && isTotalCountRow) {
+      totalCount = Number(first.TotalCount ?? 0)
+      continue
+    }
+    if (first && keys.length > 0 && !isTotalCountRow) {
+      rows = rs
+    }
+  }
+  return { totalCount, rows }
 }
 
 export async function loadGridFieldMetadata(
@@ -217,7 +425,7 @@ export function validateSortColumnPascal(
 }
 
 /**
- * Checks whether dbo.PendingTrackingItem has the IsHotCase column.
+ * Checks whether dbo.TrackingItemsTbl has the IsHotCase column.
  * Result is cached for the lifetime of the process.
  */
 let _hasIsHotCase: boolean | null = null
@@ -228,7 +436,7 @@ export async function hasIsHotCaseColumn(
   try {
     const result = await pool.request().query(`
       SELECT 1 FROM sys.columns
-      WHERE object_id = OBJECT_ID(N'dbo.PendingTrackingItem')
+      WHERE object_id = OBJECT_ID(N'dbo.TrackingItemsTbl')
         AND name = N'IsHotCase'
     `)
     _hasIsHotCase = result.recordset.length > 0
@@ -241,64 +449,30 @@ export async function hasIsHotCaseColumn(
 export function buildGridDataSql(
   fields: FieldMetadataRow[],
   params: GridQueryParams,
-  includeHotCase = false
+  includeHotCase = false,
+  useReportEligibleTvf = true
 ): { sql: string; orderByColumn: string } {
-  const fieldSelect = buildFieldSelectFragments(fields)
-  const hasCustom = fields.some(
-    (f) => f.SourceType === "Custom" && !isCalculatedField(f)
-  )
-  const sortCol = validateSortColumnPascal(params.sortBy, fields)
-  const orderByColumn = sortCol
-
-  const tfvJoin = hasCustom
-    ? `LEFT JOIN dbo.TrackingItemFieldValues tfv ON tfv.TrackingItemId = ti.TrackingItemId
-  LEFT JOIN dbo.FieldMetadataOption opt ON opt.FieldOptionId = tfv.DropdownOptionId
-    AND opt.FieldMetadataId = tfv.FieldMetadataId`
-    : ""
-
-  const hotCaseFragment = includeHotCase
-    ? `MAX(CAST(ISNULL(ti.IsHotCase, 0) AS INT)) AS [IsHotCase],`
-    : ""
-
-  const selectList = fieldSelect
-    ? `ti.TrackingItemId,
-    ${hotCaseFragment}
-    ${fieldSelect}`
-    : `ti.TrackingItemId${includeHotCase ? ",\n    MAX(CAST(ISNULL(ti.IsHotCase, 0) AS INT)) AS [IsHotCase]" : ""}`
-
-  const sql = `
-;WITH Grid AS (
-  SELECT
-    ${selectList}
-  FROM dbo.PendingTrackingItem ti
-  ${tfvJoin}
-  WHERE ti.IsActive = 1
-    AND ti.CompanyId = @companyId
-    AND ti.ViewType = @viewType
-    AND (@facilityId IS NULL OR @facilityId = N'' OR ti.FacilityId = @facilityId)
-    AND (@status IS NULL OR @status = N'' OR ti.Status = @status)
-    AND (
-      @search IS NULL OR @search = N'' OR ti.ResidentName LIKE N'%' + @search + N'%'
-    )
-  GROUP BY ti.TrackingItemId
-)
-SELECT *
-FROM Grid
-ORDER BY ${orderByColumn} ${params.sortDirection === "desc" ? "DESC" : "ASC"}
-OFFSET @offset ROWS FETCH NEXT @pageSize ROWS ONLY
-`
-
-  return { sql, orderByColumn }
+  const filterMode: GridReportFilterMode = useReportEligibleTvf ? "tvf" : "legacy"
+  return buildGridPagedSelectSql(fields, params, includeHotCase, filterMode)
 }
 
-export function buildGridCountSql(): string {
+export function buildGridCountSql(
+  params: GridQueryParams,
+  useReportEligibleTvf = true
+): string {
+  if (useReportEligibleTvf) {
+    return `
+SELECT COUNT(*) AS TotalCount
+FROM dbo.TrackingItemsTbl ti
+${SQL_REPORT_ELIGIBLE_JOIN_TI}
+`
+  }
   return `
 SELECT COUNT(*) AS TotalCount
-FROM dbo.PendingTrackingItem ti
-WHERE ti.IsActive = 1
-  AND ti.CompanyId = @companyId
-  AND ti.ViewType = @viewType
-  AND (@facilityId IS NULL OR @facilityId = N'' OR ti.FacilityId = @facilityId)
+FROM dbo.TrackingItemsTbl ti
+WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+  AND dbo.fn_PendingTracking_MatchesReport(@reportKey, ti.PayerType, ti.PayerName, ti.ViewType) = 1
+  ${SQL_FILTER_FACILITY_LIST_TI}
   AND (@status IS NULL OR @status = N'' OR ti.Status = @status)
   AND (
     @search IS NULL OR @search = N'' OR ti.ResidentName LIKE N'%' + @search + N'%'
@@ -312,10 +486,16 @@ export function applyGridRequestInputs(
 ): void {
   const offset = (params.page - 1) * params.pageSize
   request.input("companyId", sql.Int, params.companyId)
-  request.input("viewType", sql.NVarChar(100), params.viewType)
+  request.input("reportKey", sql.NVarChar(120), params.viewType)
   request.input("search", sql.NVarChar(200), params.search ?? null)
-  request.input("facilityId", sql.NVarChar(50), params.facilityId ?? null)
+  const facilityCsv = sanitizeFacilityIdsForCsv(params.facilityIds)
+  request.input("facilityIdList", sql.NVarChar(sql.MAX), facilityCsv)
   request.input("status", sql.NVarChar(100), params.status ?? null)
+  request.input(
+    "includeInactive",
+    sql.Bit,
+    params.includeInactive ? 1 : 0
+  )
   request.input("offset", sql.Int, offset)
   request.input("pageSize", sql.Int, params.pageSize)
 }

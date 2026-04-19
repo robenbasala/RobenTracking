@@ -91,6 +91,8 @@ export type ResidentNote = {
   body: string
   createdAt: string
   createdBy: string | null
+  isPinned?: boolean
+  isHighlighted?: boolean
 }
 
 export type ResidentEmail = {

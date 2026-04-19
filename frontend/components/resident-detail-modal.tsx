@@ -16,9 +16,11 @@ import {
   LayoutGrid,
   Loader2,
   LogIn,
+  Highlighter,
   LogOut,
   Mail,
   Paperclip,
+  Pin,
   Plus,
   Printer,
   Send,
@@ -832,6 +834,10 @@ function NotesTab({
   const [body, setBody] = useState("")
   const [noteType, setNoteType] = useState("CaseNote")
   const [saving, setSaving] = useState(false)
+  const [phBusy, setPhBusy] = useState<{
+    noteId: number
+    kind: "pin" | "hl"
+  } | null>(null)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -871,6 +877,32 @@ function NotesTab({
       `/api/pending-tracking/${trackingItemId}/notes/${noteId}?companyId=${companyId}`
     )
     await load()
+  }
+
+  async function togglePin(n: ResidentNote) {
+    setPhBusy({ noteId: n.noteId, kind: "pin" })
+    try {
+      await apiPatch(
+        `/api/pending-tracking/${trackingItemId}/notes/${n.noteId}`,
+        { companyId, isPinned: !n.isPinned }
+      )
+      await load()
+    } finally {
+      setPhBusy(null)
+    }
+  }
+
+  async function toggleHl(n: ResidentNote) {
+    setPhBusy({ noteId: n.noteId, kind: "hl" })
+    try {
+      await apiPatch(
+        `/api/pending-tracking/${trackingItemId}/notes/${n.noteId}`,
+        { companyId, isHighlighted: !n.isHighlighted }
+      )
+      await load()
+    } finally {
+      setPhBusy(null)
+    }
   }
 
   const NOTE_TYPE_COLOR: Record<string, string> = {
@@ -928,13 +960,58 @@ function NotesTab({
       ) : (
         <div className="flex flex-col gap-3">
           {notes.map((n) => (
-            <div key={n.noteId} className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+            <div
+              key={n.noteId}
+              className={cn(
+                "rounded-xl border bg-white p-4 shadow-sm",
+                n.isHighlighted
+                  ? "border-amber-200 bg-amber-50/90 ring-1 ring-amber-200/80"
+                  : "border-slate-200",
+                n.isPinned && "border-l-4 border-l-amber-500 pl-3"
+              )}
+            >
               <div className="mb-2 flex items-center justify-between gap-2">
                 <span className={cn("rounded-full px-2.5 py-0.5 text-[10px] font-bold", NOTE_TYPE_COLOR[n.noteType] ?? "bg-slate-100 text-slate-500")}>
                   {n.noteType}
                 </span>
-                <div className="flex items-center gap-2">
-                  <span className="text-[11px] text-slate-400">
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    title={n.isPinned ? "Unpin" : "Pin to top"}
+                    disabled={phBusy !== null}
+                    onClick={() => void togglePin(n)}
+                    className={cn(
+                      "rounded p-1.5 transition-colors",
+                      n.isPinned
+                        ? "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                        : "text-slate-300 hover:bg-amber-50 hover:text-amber-600"
+                    )}
+                  >
+                    {phBusy?.noteId === n.noteId && phBusy.kind === "pin" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Pin className={cn("h-3.5 w-3.5", n.isPinned && "fill-current")} />
+                    )}
+                  </button>
+                  <button
+                    type="button"
+                    title={n.isHighlighted ? "Remove highlight" : "Highlight"}
+                    disabled={phBusy !== null}
+                    onClick={() => void toggleHl(n)}
+                    className={cn(
+                      "rounded p-1.5 transition-colors",
+                      n.isHighlighted
+                        ? "bg-amber-200 text-amber-900 hover:bg-amber-300"
+                        : "text-slate-300 hover:bg-amber-50 hover:text-amber-700"
+                    )}
+                  >
+                    {phBusy?.noteId === n.noteId && phBusy.kind === "hl" ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Highlighter className="h-3.5 w-3.5" />
+                    )}
+                  </button>
+                  <span className="mx-1 text-[11px] text-slate-400">
                     {new Date(n.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
                     {n.createdBy ? ` · ${n.createdBy}` : ""}
                   </span>

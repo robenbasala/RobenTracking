@@ -1000,14 +1000,14 @@ export default function AdminFieldsPage() {
               </div>
               <div>
                 <p className="text-muted-foreground text-xs font-medium">
-                  View type (PendingTrackingItem.ViewType)
+                  View type (TrackingItemsTbl.ViewType)
                 </p>
                 <p className="text-muted-foreground/90 mb-2 text-[11px]">
                   Leave none checked to show for every view type.
                 </p>
                 {viewTypeOptions.length === 0 ? (
                   <p className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
-                    No view types in PendingTrackingItem for this company.
+                    No view types in TrackingItemsTbl for this company.
                   </p>
                 ) : (
                   <div className="border-input bg-muted/20 flex max-h-40 flex-col gap-2 overflow-y-auto rounded-md border p-3">

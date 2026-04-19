@@ -5,7 +5,7 @@
   - One FieldMetadata row per (CompanyId, FieldName). If multiple ViewTypes define the same
     field, the row with lowest FieldDefinitionId wins for DisplayName / DisplayOrder / etc.
   - Each (FieldDefinitionId) ViewType becomes a row in FieldMetadataPayerType(PayerType = ViewType).
-  - Extension fields are stored as SourceType = Custom (not columns on PendingTrackingItem).
+  - Extension fields are stored as SourceType = Custom (not columns on TrackingItemsTbl).
   - ScreenLocation: Grid -> Main, Detail stays Detail (legacy "Base" -> Detail).
 
   Prerequisites: 003-field-metadata-schema.sql applied. Safe to re-run: skips existing FieldMetadata

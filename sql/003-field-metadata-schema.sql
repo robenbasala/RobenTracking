@@ -1,7 +1,7 @@
 /*
   Field metadata (per company) + custom values + payer/state applicability.
   ScreenLocation: Main = grid, Detail = drawer/detail.
-  Run after PendingTrackingItem exists.
+  Run after TrackingItemsTbl exists.
 
   ---------------------------------------------------------------------------
   REQUIRED: Run this script in the SAME database as your app connection string.
@@ -124,7 +124,7 @@ BEGIN
 END
 GO
 
-/* Migration: alter TrackingItemId to BIGINT for existing tables and add FK to PendingTrackingItem. */
+/* Migration: alter TrackingItemId to BIGINT for existing tables and add FK to TrackingItemsTbl. */
 IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL
 BEGIN
   -- Check if column exists and is INT, then alter to BIGINT
@@ -143,7 +143,7 @@ GO
 
 -- Now add FK if it doesn't exist
 IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL
-  AND OBJECT_ID(N'dbo.PendingTrackingItem', N'U') IS NOT NULL
+  AND OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM sys.foreign_keys
@@ -153,7 +153,7 @@ BEGIN
   BEGIN
     ALTER TABLE dbo.TrackingItemFieldValues WITH NOCHECK
       ADD CONSTRAINT FK_TrackingItemFieldValues_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE;
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE;
     PRINT N'Added FK_TrackingItemFieldValues_TrackingItem (WITH NOCHECK — existing orphans not validated).';
   END
 END

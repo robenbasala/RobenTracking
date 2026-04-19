@@ -128,10 +128,10 @@ BEGIN
   CREATE NONCLUSTERED INDEX IX_TrackingItemFieldValues_Item ON dbo.TrackingItemFieldValues (TrackingItemId);
 END;
 
--- Add FK from TrackingItemFieldValues to PendingTrackingItem when both tables exist.
--- Guarded separately because PendingTrackingItem may not exist on first schema init.
+-- Add FK from TrackingItemFieldValues to TrackingItemsTbl when both tables exist.
+-- Guarded separately because TrackingItemsTbl may not exist on first schema init.
 IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL
-  AND OBJECT_ID(N'dbo.PendingTrackingItem', N'U') IS NOT NULL
+  AND OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM sys.foreign_keys
@@ -141,7 +141,7 @@ BEGIN
   BEGIN
     ALTER TABLE dbo.TrackingItemFieldValues WITH NOCHECK
       ADD CONSTRAINT FK_TrackingItemFieldValues_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE;
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE;
   END
 END;
 
@@ -205,7 +205,7 @@ BEGIN
     CONSTRAINT PK_ResidentTask PRIMARY KEY CLUSTERED (TaskId),
     CONSTRAINT CK_ResidentTask_Status CHECK (Status IN (N'Open', N'InProgress', N'Completed', N'Cancelled')),
     CONSTRAINT FK_ResidentTask_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentTask_TrackingItem
     ON dbo.ResidentTask (TrackingItemId, Status);
@@ -225,7 +225,7 @@ BEGIN
     CONSTRAINT PK_ResidentNote PRIMARY KEY CLUSTERED (NoteId),
     CONSTRAINT CK_ResidentNote_NoteType CHECK (NoteType IN (N'CaseNote', N'Internal', N'External')),
     CONSTRAINT FK_ResidentNote_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentNote_TrackingItem
     ON dbo.ResidentNote (TrackingItemId, CreatedAt);
@@ -250,7 +250,7 @@ BEGIN
     CONSTRAINT PK_ResidentEmail PRIMARY KEY CLUSTERED (EmailId),
     CONSTRAINT CK_ResidentEmail_Status CHECK (Status IN (N'Sent', N'Failed', N'Queued')),
     CONSTRAINT FK_ResidentEmail_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentEmail_TrackingItem
     ON dbo.ResidentEmail (TrackingItemId, SentAt);
@@ -277,7 +277,7 @@ BEGIN
     IsDeleted      BIT            NOT NULL CONSTRAINT DF_ResidentAttachment_IsDeleted DEFAULT (0),
     CONSTRAINT PK_ResidentAttachment PRIMARY KEY CLUSTERED (AttachmentId),
     CONSTRAINT FK_ResidentAttachment_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentAttachment_TrackingItem
     ON dbo.ResidentAttachment (TrackingItemId, IsDeleted, UploadedAt);

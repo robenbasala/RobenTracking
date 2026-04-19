@@ -93,6 +93,10 @@ export type ResidentNote = {
   body: string
   createdAt: string
   createdBy: string | null
+  /** Pinned notes sort first (see sql/013). */
+  isPinned?: boolean
+  /** Highlighted for quick visual scan (see sql/013). */
+  isHighlighted?: boolean
 }
 
 export type ResidentEmail = {

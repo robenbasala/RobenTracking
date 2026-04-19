@@ -49,6 +49,7 @@ app.get("/api/pending-tracking/facilities", h.getFacilities)
 app.get("/api/pending-tracking/fields", h.getFields)
 app.get("/api/pending-tracking/grid", h.getGrid)
 app.get("/api/pending-tracking/export", h.getExport)
+app.get("/api/pending-tracking/export-pdf", h.getExportPdf)
 
 // ---------------------------------------------------------------------------
 // Pending tracking — single item & values
@@ -111,6 +112,10 @@ app.delete(
 // ---------------------------------------------------------------------------
 // Admin — field metadata & options
 // ---------------------------------------------------------------------------
+app.get(
+  "/api/admin/field-metadata/tracking-columns",
+  h.getAdminTrackingItemColumns
+)
 app.get("/api/admin/field-metadata", h.getAdminFieldMetadata)
 app.post("/api/admin/field-metadata", h.postAdminFieldMetadata)
 app.patch(
@@ -150,6 +155,16 @@ app.patch("/api/admin/modal-sections/:sectionId", h.patchModalSection)
 app.delete("/api/admin/modal-sections/:sectionId", h.deleteModalSection)
 
 const port = Number(process.env.PORT ?? 3001)
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Tracking API listening on http://localhost:${port}`)
+})
+server.on("error", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EADDRINUSE") {
+    console.error(
+      `Port ${port} is already in use. Stop the other API process or set PORT to a free port (e.g. PORT=3002).`
+    )
+  } else {
+    console.error(err)
+  }
+  process.exit(1)
 })

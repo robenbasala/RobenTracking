@@ -73,7 +73,7 @@ async function updateBaseColumn(
 
   if (value === null || value === undefined || value === "") {
     await req.query(`
-      UPDATE dbo.PendingTrackingItem SET ${col} = NULL
+      UPDATE dbo.TrackingItemsTbl SET ${col} = NULL
       WHERE TrackingItemId = @trackingItemId
     `)
     return
@@ -83,7 +83,7 @@ async function updateBaseColumn(
     const d = typeof value === "string" ? new Date(value) : value instanceof Date ? value : null
     req.input("v", sql.Date, d && !Number.isNaN(d.getTime()) ? d : null)
     await req.query(`
-      UPDATE dbo.PendingTrackingItem SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+      UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
     `)
     return
   }
@@ -94,7 +94,7 @@ async function updateBaseColumn(
       String(value).toLowerCase() === "true"
     req.input("v", sql.Bit, b ? 1 : 0)
     await req.query(`
-      UPDATE dbo.PendingTrackingItem SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+      UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
     `)
     return
   }
@@ -109,13 +109,13 @@ async function updateBaseColumn(
     const n = typeof value === "number" ? value : Number(value)
     req.input("v", sql.Float, Number.isFinite(n) ? n : null)
     await req.query(`
-      UPDATE dbo.PendingTrackingItem SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+      UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
     `)
     return
   }
   req.input("v", sql.NVarChar(sql.MAX), String(value))
   await req.query(`
-    UPDATE dbo.PendingTrackingItem SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+    UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
   `)
 }
 

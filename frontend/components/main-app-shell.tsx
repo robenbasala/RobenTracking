@@ -5,12 +5,20 @@ import { cn } from "@/lib/utils"
 import { TopNav } from "@/components/top-nav"
 import { SideNav } from "@/components/side-nav"
 
-export function MainAppShell({ children, onExport }: { children: React.ReactNode; onExport?: () => void }) {
+export function MainAppShell({
+  children,
+  onExport,
+  onExportPdf,
+}: {
+  children: React.ReactNode
+  onExport?: () => void
+  onExportPdf?: () => void
+}) {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
 
   return (
     <div className="min-h-screen bg-surface">
-      <TopNav onExport={onExport} />
+      <TopNav onExport={onExport} onExportPdf={onExportPdf} />
       <SideNav
         collapsed={sidebarCollapsed}
         onToggleCollapse={() => setSidebarCollapsed((c) => !c)}

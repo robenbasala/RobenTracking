@@ -6,8 +6,10 @@ import {
   Check,
   ChevronLeft,
   ChevronRight,
+  Highlighter,
   Loader2,
   Pencil,
+  Pin,
   StickyNote,
   Trash2,
   X,
@@ -21,6 +23,8 @@ type NoteDto = {
   body: string
   createdAt: string
   createdBy: string | null
+  isPinned?: boolean
+  isHighlighted?: boolean
 }
 
 type ResidentNotesPanelProps = {
@@ -51,6 +55,10 @@ export function ResidentNotesPanel({
   // Delete state
   const [deletingNoteId, setDeletingNoteId] = useState<number | null>(null)
   const [deleteConfirm, setDeleteConfirm] = useState<number | null>(null)
+  const [phBusy, setPhBusy] = useState<{
+    noteId: number
+    kind: "pin" | "hl"
+  } | null>(null)
 
   const loadNotes = useCallback(async () => {
     if (trackingItemId == null) return
@@ -135,6 +143,42 @@ export function ResidentNotesPanel({
       setError(e instanceof Error ? e.message : "Failed to update note.")
     } finally {
       setEditSaving(false)
+    }
+  }
+
+  async function togglePinned(note: NoteDto) {
+    if (trackingItemId == null) return
+    setPhBusy({ noteId: note.noteId, kind: "pin" })
+    setError(null)
+    try {
+      const res = await apiPatch(
+        `/api/pending-tracking/${trackingItemId}/notes/${note.noteId}`,
+        { companyId, isPinned: !note.isPinned }
+      )
+      if (!res.ok) throw new Error("Could not update pin.")
+      await loadNotes()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update pin.")
+    } finally {
+      setPhBusy(null)
+    }
+  }
+
+  async function toggleHighlighted(note: NoteDto) {
+    if (trackingItemId == null) return
+    setPhBusy({ noteId: note.noteId, kind: "hl" })
+    setError(null)
+    try {
+      const res = await apiPatch(
+        `/api/pending-tracking/${trackingItemId}/notes/${note.noteId}`,
+        { companyId, isHighlighted: !note.isHighlighted }
+      )
+      if (!res.ok) throw new Error("Could not update highlight.")
+      await loadNotes()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not update highlight.")
+    } finally {
+      setPhBusy(null)
     }
   }
 
@@ -316,7 +360,12 @@ export function ResidentNotesPanel({
                             ? "border-blue-200 ring-1 ring-blue-100"
                             : isConfirmingDelete
                               ? "border-red-200 bg-red-50/50"
-                              : "border-slate-100 hover:border-slate-200"
+                              : n.isHighlighted
+                                ? "border-amber-200 bg-amber-50/90 ring-1 ring-amber-200/80 hover:border-amber-300"
+                                : "border-slate-100 hover:border-slate-200",
+                          n.isPinned && !isEditing && !isConfirmingDelete
+                            ? "border-l-4 border-l-amber-500 pl-3"
+                            : ""
                         )}
                       >
                         {/* Meta row */}
@@ -340,7 +389,56 @@ export function ResidentNotesPanel({
 
                           {/* Action buttons (visible on hover or when active) */}
                           {!isEditing && !isConfirmingDelete && (
-                            <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                            <div className="flex items-center gap-0.5 opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100">
+                              <button
+                                type="button"
+                                title={
+                                  n.isPinned ? "Unpin from top" : "Pin to top"
+                                }
+                                disabled={phBusy !== null}
+                                className={cn(
+                                  "rounded-lg p-1.5 transition-colors",
+                                  n.isPinned
+                                    ? "bg-amber-100 text-amber-700 hover:bg-amber-200"
+                                    : "text-slate-400 hover:bg-amber-50 hover:text-amber-600"
+                                )}
+                                onClick={() => void togglePinned(n)}
+                              >
+                                {phBusy?.noteId === n.noteId &&
+                                phBusy.kind === "pin" ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Pin
+                                    className={cn(
+                                      "h-3.5 w-3.5",
+                                      n.isPinned && "fill-current"
+                                    )}
+                                  />
+                                )}
+                              </button>
+                              <button
+                                type="button"
+                                title={
+                                  n.isHighlighted
+                                    ? "Remove highlight"
+                                    : "Highlight note"
+                                }
+                                disabled={phBusy !== null}
+                                className={cn(
+                                  "rounded-lg p-1.5 transition-colors",
+                                  n.isHighlighted
+                                    ? "bg-amber-200 text-amber-900 hover:bg-amber-300"
+                                    : "text-slate-400 hover:bg-amber-50 hover:text-amber-700"
+                                )}
+                                onClick={() => void toggleHighlighted(n)}
+                              >
+                                {phBusy?.noteId === n.noteId &&
+                                phBusy.kind === "hl" ? (
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Highlighter className="h-3.5 w-3.5" />
+                                )}
+                              </button>
                               <button
                                 type="button"
                                 title="Edit note"

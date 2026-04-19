@@ -1,5 +1,5 @@
 /**
- * If FieldMetadata is empty and PendingTrackingItem exists, seed one row per column (same idea as sql/004).
+ * If FieldMetadata is empty and TrackingItemsTbl exists, seed one row per column (same idea as sql/004).
  * Runs at most once per process when auto-seed is enabled.
  */
 import sql from "mssql"
@@ -42,7 +42,7 @@ export async function seedFieldMetadataIfDatabaseEmpty(
   if (seedDone) return
 
   const tableCheck = await pool.request().query<{ oid: number | null }>(`
-    SELECT OBJECT_ID(N'dbo.PendingTrackingItem', N'U') AS oid
+    SELECT OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') AS oid
   `)
   if (!tableCheck.recordset[0]?.oid) {
     return
@@ -72,7 +72,7 @@ export async function seedFieldMetadataIfDatabaseEmpty(
   }>(`
     SELECT COLUMN_NAME, DATA_TYPE, ORDINAL_POSITION
     FROM INFORMATION_SCHEMA.COLUMNS
-    WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'PendingTrackingItem'
+    WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'TrackingItemsTbl'
     ORDER BY ORDINAL_POSITION
   `)
 

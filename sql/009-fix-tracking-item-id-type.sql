@@ -1,5 +1,5 @@
 /*
-  Fix: Alter TrackingItemFieldValues.TrackingItemId to match PendingTrackingItem.TrackingItemId type (BIGINT)
+  Fix: Alter TrackingItemFieldValues.TrackingItemId to match TrackingItemsTbl.TrackingItemId type (BIGINT)
   and properly add the foreign key constraint.
 
   This script:
@@ -74,7 +74,7 @@ GO
 
 -- Now add the foreign key if it doesn't exist
 IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL
-  AND OBJECT_ID(N'dbo.PendingTrackingItem', N'U') IS NOT NULL
+  AND OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
 BEGIN
   IF NOT EXISTS (
     SELECT 1 FROM sys.foreign_keys
@@ -84,7 +84,7 @@ BEGIN
   BEGIN
     ALTER TABLE dbo.TrackingItemFieldValues
       ADD CONSTRAINT FK_TrackingItemFieldValues_TrackingItem
-      FOREIGN KEY (TrackingItemId) REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE;
+      FOREIGN KEY (TrackingItemId) REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE;
     PRINT N'Added FK_TrackingItemFieldValues_TrackingItem.';
   END
 END

@@ -13,6 +13,7 @@ import {
   ChevronRight,
   Circle,
   Flame,
+  LayoutGrid,
   Loader2,
   Pencil,
   StickyNote,
@@ -29,6 +30,7 @@ import {
   formatCellForColumn,
   parseBooleanFromCell,
 } from "@/lib/pending-tracking/formatters"
+import { getActingUserLabel } from "@/lib/acting-user"
 import {
   getRowValueForKey,
   getTrackingItemIdFromRow,
@@ -44,8 +46,14 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import { GridColumnSettingsSheet } from "@/components/grid-column-settings-sheet"
 import { ResidentDetailModal } from "@/components/resident-detail-modal"
 import { ResidentNotesPanel } from "@/components/resident-notes-panel"
+import {
+  applyGridColumnPrefs,
+  loadGridColumnPrefs,
+  type GridColumnPrefs,
+} from "@/lib/pending-tracking/grid-column-preferences"
 
 /* ─── Date value helper ───────────────────────────────── */
 function toDateInputValue(v: unknown): string {
@@ -168,21 +176,29 @@ type PendingTrackingGridProps = {
   companyId: number
   viewType: string
   search: string
-  facilityId?: string | null
+  facilityIds?: string[]
   state?: string | null
   status?: string | null
+  /** When true, load rows with IsActive = 0 as well as active rows. */
+  includeInactive?: boolean
 }
 
 const GRID_FETCH_TIMEOUT_MS = 60_000
+
+function rowIsInactive(row: Record<string, unknown>): boolean {
+  const v = getRowValueForKey(row, "isActive")
+  return v === false || v === 0 || v === "0"
+}
 
 /* ─── Component ───────────────────────────────────────── */
 export function PendingTrackingGrid({
   companyId,
   viewType,
   search,
-  facilityId,
+  facilityIds = [],
   state,
   status,
+  includeInactive = false,
 }: PendingTrackingGridProps) {
   /* Grid state */
   const [columns, setColumns] = useState<GridColumnMeta[]>([])
@@ -217,8 +233,14 @@ export function PendingTrackingGrid({
     label: string | null
   } | null>(null)
   const [deleting, setDeleting] = useState(false)
+  const [columnPrefs, setColumnPrefs] = useState<GridColumnPrefs | null>(null)
+  const [colSettingsOpen, setColSettingsOpen] = useState(false)
 
   const skipLoadAfterSortSyncRef = useRef(false)
+
+  useEffect(() => {
+    setColumnPrefs(loadGridColumnPrefs(companyId, viewType))
+  }, [companyId, viewType, columns])
 
   /* ── Load grid ── */
   const loadGrid = useCallback(async () => {
@@ -231,13 +253,15 @@ export function PendingTrackingGrid({
       params.set("companyId", String(companyId))
       params.set("viewType", viewType)
       if (search.trim()) params.set("search", search.trim())
-      if (facilityId) params.set("facilityId", facilityId)
+      if (facilityIds.length > 0)
+        params.set("facilityIds", facilityIds.join(","))
       if (state?.trim()) params.set("state", state.trim().slice(0, 2).toUpperCase())
       if (status) params.set("status", status)
       params.set("page", String(page))
       params.set("pageSize", String(pageSize))
       params.set("sortBy", sortBy)
       params.set("sortDirection", sortDirection)
+      if (includeInactive) params.set("includeInactive", "1")
 
       const res = await apiGet(`/api/pending-tracking/grid?${params}`, {
         cache: "no-store",
@@ -280,7 +304,19 @@ export function PendingTrackingGrid({
       clearTimeout(timeoutId)
       setLoading(false)
     }
-  }, [companyId, viewType, search, facilityId, state, status, page, pageSize, sortBy, sortDirection])
+  }, [
+    companyId,
+    viewType,
+    search,
+    facilityIds,
+    state,
+    status,
+    includeInactive,
+    page,
+    pageSize,
+    sortBy,
+    sortDirection,
+  ])
 
   useEffect(() => {
     if (skipLoadAfterSortSyncRef.current) {
@@ -292,10 +328,15 @@ export function PendingTrackingGrid({
 
   const totalPages = Math.max(1, Math.ceil(totalCount / pageSize))
 
+  const displayColumns = useMemo(
+    () => applyGridColumnPrefs(columns, columnPrefs),
+    [columns, columnPrefs]
+  )
+
   const detailLinkColumnKey = useMemo(() => {
-    const marked = columns.find((c) => c.opensResidentDetail)
-    return marked?.key ?? columns[0]?.key ?? null
-  }, [columns])
+    const marked = displayColumns.find((c) => c.opensResidentDetail)
+    return marked?.key ?? displayColumns[0]?.key ?? null
+  }, [displayColumns])
 
   /* ── Sort ── */
   function handleSort(columnKey: string) {
@@ -361,8 +402,9 @@ export function PendingTrackingGrid({
     if (!deleteTarget) return
     setDeleting(true)
     try {
+      const stoppedBy = encodeURIComponent(getActingUserLabel())
       const res = await apiDelete(
-        `/api/pending-tracking/${deleteTarget.id}?companyId=${companyId}`
+        `/api/pending-tracking/${deleteTarget.id}?companyId=${companyId}&stoppedBy=${stoppedBy}`
       )
       if (!res.ok) {
         const err = (await res.json()) as { error?: string }
@@ -407,11 +449,24 @@ export function PendingTrackingGrid({
     <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch">
       {/* ── Main grid (fills space next to notes sidebar) ── */}
       <div className="min-w-0 flex-1 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+        <div className="flex flex-wrap items-center justify-end gap-2 border-b border-slate-100 bg-slate-50/70 px-3 py-2 dark:bg-slate-900/30">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-9"
+            disabled={columns.length === 0}
+            onClick={() => setColSettingsOpen(true)}
+          >
+            <LayoutGrid className="mr-2 h-4 w-4" />
+            Columns
+          </Button>
+        </div>
         <div className="overflow-x-auto" style={{ minWidth: 0 }}>
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50">
-                {columns.map((col) => (
+                {displayColumns.map((col) => (
                   <th
                     key={col.key}
                     className="cursor-pointer select-none px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-blue-600"
@@ -429,7 +484,7 @@ export function PendingTrackingGrid({
             <tbody className="divide-y divide-slate-100">
               {loading && (
                 <tr>
-                  <td className="px-6 py-12 text-slate-400" colSpan={columns.length + 1}>
+                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 1}>
                     <span className="inline-flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
                       Loading…
@@ -439,7 +494,7 @@ export function PendingTrackingGrid({
               )}
               {!loading && error && (
                 <tr>
-                  <td className="px-6 py-8 text-red-500" colSpan={columns.length + 1}>{error}</td>
+                  <td className="px-6 py-8 text-red-500" colSpan={displayColumns.length + 1}>{error}</td>
                 </tr>
               )}
               {!loading && !error && rows.map((row, rowIndex) => {
@@ -449,18 +504,21 @@ export function PendingTrackingGrid({
                   getRowValueForKey(row, "IsHotCase") ||
                   getRowValueForKey(row, "isHotCase")
                 )
+                const isStoppedRow = includeInactive && rowIsInactive(row)
 
                 return (
                   <tr
                     key={rowKey}
                     className={cn(
                       "transition-colors",
-                      isHotCase
-                        ? "border-l-4 border-l-orange-400 bg-orange-50/30 hover:bg-orange-50/60"
-                        : "hover:bg-slate-50/70"
+                      isStoppedRow
+                        ? "border-l-4 border-l-rose-800 bg-rose-100/95 text-rose-950 hover:bg-rose-100 dark:border-l-rose-500 dark:bg-rose-950/40 dark:text-rose-50 dark:hover:bg-rose-950/55"
+                        : isHotCase
+                          ? "border-l-4 border-l-orange-400 bg-orange-50/30 hover:bg-orange-50/60"
+                          : "hover:bg-slate-50/70"
                     )}
                   >
-                    {columns.map((col, colIdx) => {
+                    {displayColumns.map((col, colIdx) => {
                       const isCellEditing = editingCell?.rowId === id && editingCell?.colKey === col.key
                       const isCellSaving = savingCell?.rowId === id && savingCell?.colKey === col.key
                       const isDetailLink = detailLinkColumnKey != null && col.key === detailLinkColumnKey
@@ -531,7 +589,14 @@ export function PendingTrackingGrid({
                     })}
 
                     {/* Actions */}
-                    <td className="sticky right-0 z-10 bg-white px-4 py-2.5 text-right">
+                    <td
+                      className={cn(
+                        "sticky right-0 z-10 px-4 py-2.5 text-right",
+                        isStoppedRow
+                          ? "bg-rose-100/95 dark:bg-rose-950/40"
+                          : "bg-white"
+                      )}
+                    >
                       <div className="flex justify-end gap-1 flex-shrink-0">
                         <button
                           type="button"
@@ -591,7 +656,7 @@ export function PendingTrackingGrid({
               })}
               {!loading && !error && rows.length === 0 && (
                 <tr>
-                  <td className="px-6 py-12 text-slate-400" colSpan={columns.length + 1}>
+                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 1}>
                     No records match your filters.
                   </td>
                 </tr>
@@ -619,6 +684,17 @@ export function PendingTrackingGrid({
         </div>
       </div>
 
+      <GridColumnSettingsSheet
+        open={colSettingsOpen}
+        onOpenChange={setColSettingsOpen}
+        companyId={companyId}
+        viewType={viewType}
+        columns={columns}
+        onApplied={() =>
+          setColumnPrefs(loadGridColumnPrefs(companyId, viewType))
+        }
+      />
+
       <ResidentNotesPanel
         companyId={companyId}
         trackingItemId={notesFor?.id ?? null}
@@ -640,9 +716,9 @@ export function PendingTrackingGrid({
       <AlertDialog open={deleteTarget != null} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete Record</AlertDialogTitle>
+            <AlertDialogTitle>Stop Tracking</AlertDialogTitle>
             <AlertDialogDescription>
-              Are you sure you want to delete{" "}
+              Are you sure you want to stop tracking{" "}
               {deleteTarget?.label ? (
                 <strong>{deleteTarget.label}</strong>
               ) : (

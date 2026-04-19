@@ -16,17 +16,31 @@ import {
 import type { FormulaDefinition } from "./lib/pending-tracking/formula-definition.js"
 import { formulaDefinitionSchema } from "./lib/pending-tracking/formula-definition.js"
 import {
+  SQL_FILTER_FACILITY_LIST_TI,
+  parseFacilityIdsFromQuery,
+  sanitizeFacilityIdsForCsv,
+} from "./lib/pending-tracking/facility-query.js"
+import {
   applyGridRequestInputs,
   buildGridColumnMetadataFromFields,
   buildGridCountSql,
   buildGridDataSql,
+  buildGridPagedBatchViaReportItemIdsProc,
   fetchDropdownOptionsForFields,
   hasIsHotCaseColumn,
+  hasReportEligibleItemsTvf,
+  hasReportSelectItemIdsProcedure,
   loadGridFieldMetadata,
+  parseGridPagedBatchRecordsets,
+  useReportItemIdsProcedureForGrid,
   type GridQueryParams,
 } from "./lib/pending-tracking/grid-sql.js"
+import { loadGridExportRows } from "./lib/pending-tracking/grid-export.js"
 import { mapGridRowWithFieldMetadata } from "./lib/pending-tracking/map-row.js"
 import { saveTrackingItemFieldValues } from "./lib/pending-tracking/save-field-values.js"
+import { parseColumnKeysFromQuery, orderColumnsByKeys } from "./lib/pending-tracking/export-column-order.js"
+import { formatExportCellValue, formatShortDateValue } from "./lib/pending-tracking/export-formatters.js"
+import { streamTrackingGridPdf } from "./lib/pending-tracking/stream-grid-pdf.js"
 import type { PendingTrackingGridResponse } from "./lib/pending-tracking/types.js"
 import { isValidViewTypeParam } from "./lib/pending-tracking/view-types.js"
 
@@ -69,6 +83,44 @@ function numParam(
   return Number.isFinite(n) ? n : null
 }
 
+/** Query flags such as includeInactive=1 / true / yes */
+function queryTruthyFlag(q: Record<string, unknown>, ...keys: string[]): boolean {
+  for (const key of keys) {
+    const v = q[key]
+    if (v === true) return true
+    if (typeof v === "string") {
+      const s = v.trim().toLowerCase()
+      if (s === "1" || s === "true" || s === "yes") return true
+    }
+  }
+  return false
+}
+
+function stoppedByFromRequest(req: Request): string {
+  const q = req.query as Record<string, unknown>
+  if (typeof q.stoppedBy === "string" && q.stoppedBy.trim()) {
+    return q.stoppedBy.trim().slice(0, 256)
+  }
+  const h = req.headers["x-stopped-by"]
+  if (typeof h === "string" && h.trim()) return h.trim().slice(0, 256)
+  if (Array.isArray(h)) {
+    const first = h[0]
+    if (typeof first === "string" && first.trim())
+      return first.trim().slice(0, 256)
+  }
+  return "Unknown"
+}
+
+function exportRowActiveLabel(row: Record<string, unknown>): string {
+  const v = row.isActive
+  if (v === false || v === 0 || v === "0") return "No"
+  return "Yes"
+}
+
+function exportRowStoppedAt(row: Record<string, unknown>): string {
+  return formatShortDateValue(row.stoppedAt)
+}
+
 export async function getTrackingItems(req: Request, res: Response) {
   try {
     const section = (req.query.section ?? "pending") as NavSection
@@ -105,7 +157,7 @@ export async function getTrackingItems(req: Request, res: Response) {
           THEN CAST(1 AS bit)
           ELSE CAST(0 AS bit)
         END AS isHotCase
-      FROM dbo.PendingTrackingItem
+      FROM dbo.TrackingItemsTbl
       WHERE IsActive = 1
         AND ViewType = @viewType
         AND FacilityName = @facilityName
@@ -132,20 +184,22 @@ export async function getHotCases(req: Request, res: Response) {
       res.status(400).json({ error: "companyId is required.", items: [] })
       return
     }
-    const facilityId = (req.query.facilityId as string)?.trim() || null
+    const facilityIdList = sanitizeFacilityIdsForCsv(
+      parseFacilityIdsFromQuery(req.query as Record<string, unknown>)
+    )
     const pool = await getTrackingPool()
     const includeHot = await hasIsHotCaseColumn(pool)
     if (!includeHot) {
       res.json({
         items: [],
         error:
-          "IsHotCase column is not available on PendingTrackingItem yet. Apply the latest schema migration.",
+          "IsHotCase column is not available on TrackingItemsTbl yet. Apply the latest schema migration.",
       })
       return
     }
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
-    r.input("facilityId", sql.NVarChar(50), facilityId)
+    r.input("facilityIdList", sql.NVarChar(sql.MAX), facilityIdList)
     const result = await r.query(`
       SELECT TOP 500
         ti.TrackingItemId,
@@ -155,11 +209,11 @@ export async function getHotCases(req: Request, res: Response) {
         ti.Status,
         ti.Balance,
         ti.UpdatedAt
-      FROM dbo.PendingTrackingItem ti
+      FROM dbo.TrackingItemsTbl ti
       WHERE ti.IsActive = 1
         AND ti.CompanyId = @companyId
         AND ISNULL(ti.IsHotCase, 0) = 1
-        AND (@facilityId IS NULL OR @facilityId = N'' OR ti.FacilityId = @facilityId)
+        ${SQL_FILTER_FACILITY_LIST_TI}
       ORDER BY ISNULL(ti.UpdatedAt, ti.CreatedAt) DESC
     `)
     const items = result.recordset.map((row: Record<string, unknown>) => ({
@@ -224,7 +278,7 @@ export async function getTasks(req: Request, res: Response) {
     const facResult = await facReq.query(`
       SELECT DISTINCT p.FacilityName
       FROM dbo.ResidentTask t
-      INNER JOIN dbo.PendingTrackingItem p
+      INNER JOIN dbo.TrackingItemsTbl p
         ON t.TrackingItemId = p.TrackingItemId
         AND p.CompanyId = t.CompanyId
       WHERE t.CompanyId = @companyId
@@ -246,7 +300,7 @@ export async function getTasks(req: Request, res: Response) {
     const countResult = await rq.query<{ TotalCount: number }>(`
       SELECT COUNT(*) AS TotalCount
       FROM dbo.ResidentTask t
-      LEFT JOIN dbo.PendingTrackingItem p
+      LEFT JOIN dbo.TrackingItemsTbl p
         ON t.TrackingItemId = p.TrackingItemId
         AND p.CompanyId = t.CompanyId
       ${whereClause}
@@ -274,7 +328,7 @@ export async function getTasks(req: Request, res: Response) {
         p.ResidentName,
         p.FacilityName
       FROM dbo.ResidentTask t
-      LEFT JOIN dbo.PendingTrackingItem p
+      LEFT JOIN dbo.TrackingItemsTbl p
         ON t.TrackingItemId = p.TrackingItemId
         AND p.CompanyId = t.CompanyId
       ${whereClause}
@@ -318,19 +372,21 @@ export async function getViewTypes(req: Request, res: Response) {
       })
       return
     }
-    const facilityId = (req.query.facilityId as string)?.trim() || null
+    const facilityIdList = sanitizeFacilityIdsForCsv(
+      parseFacilityIdsFromQuery(req.query as Record<string, unknown>)
+    )
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
-    r.input("facilityId", sql.NVarChar(50), facilityId)
+    r.input("facilityIdList", sql.NVarChar(sql.MAX), facilityIdList)
     const result = await r.query(`
       SELECT DISTINCT LTRIM(RTRIM(ti.ViewType)) AS ViewType
-      FROM dbo.PendingTrackingItem ti
+      FROM dbo.TrackingItemsTbl ti
       WHERE ti.CompanyId = @companyId
         AND ti.IsActive = 1
         AND ti.ViewType IS NOT NULL
         AND LTRIM(RTRIM(ti.ViewType)) <> N''
-        AND (@facilityId IS NULL OR @facilityId = N'' OR ti.FacilityId = @facilityId)
+        ${SQL_FILTER_FACILITY_LIST_TI}
       ORDER BY ViewType
     `)
     const viewTypes = result.recordset
@@ -367,7 +423,7 @@ export async function getFacilities(req: Request, res: Response) {
     r.input("companyId", sql.Int, companyId)
     const result = await r.query(`
       SELECT DISTINCT FacilityId, FacilityName
-      FROM dbo.PendingTrackingItem
+      FROM dbo.TrackingItemsTbl
       WHERE CompanyId = @companyId
         AND FacilityName IS NOT NULL
         AND FacilityName <> N''
@@ -466,7 +522,7 @@ export async function getGrid(req: Request, res: Response) {
       viewType: viewTypeRaw,
       state,
       search: (req.query.search as string) ?? null,
-      facilityId: (req.query.facilityId as string) ?? null,
+      facilityIds: parseFacilityIdsFromQuery(req.query as Record<string, unknown>),
       status: (req.query.status as string) ?? null,
       page: Math.max(1, Number(req.query.page ?? "1")),
       pageSize: Math.min(
@@ -476,6 +532,11 @@ export async function getGrid(req: Request, res: Response) {
       sortBy: (req.query.sortBy as string) ?? "trackingItemId",
       sortDirection:
         req.query.sortDirection === "desc" ? "desc" : "asc",
+      includeInactive: queryTruthyFlag(
+        req.query as Record<string, unknown>,
+        "includeInactive",
+        "showAll"
+      ),
     }
     const pool = await getTrackingPool()
     const fields = await loadGridFieldMetadata(
@@ -512,20 +573,50 @@ export async function getGrid(req: Request, res: Response) {
       }
     }
     const includeHotCase = await hasIsHotCaseColumn(pool)
-    const { sql: dataSql } = buildGridDataSql(fields, params, includeHotCase)
-    const countSql = buildGridCountSql()
-    const dataRequest = pool.request()
-    applyGridRequestInputs(dataRequest, params)
-    const dataResult = await dataRequest.query(dataSql)
-    const countRequest = pool.request()
-    applyGridRequestInputs(countRequest, params)
-    const countResult = await countRequest.query<{ TotalCount: number }>(
-      countSql
-    )
-    const totalCount = countResult.recordset[0]?.TotalCount ?? 0
-    const rows = dataResult.recordset.map((r: Record<string, unknown>) =>
-      mapGridRowWithFieldMetadata(r, fields)
-    )
+    const useReportEligibleTvf = await hasReportEligibleItemsTvf(pool)
+    const useSpItemIdsBatch =
+      useReportItemIdsProcedureForGrid() &&
+      useReportEligibleTvf &&
+      (await hasReportSelectItemIdsProcedure(pool))
+
+    let totalCount = 0
+    let rows: Record<string, unknown>[] = []
+
+    if (useSpItemIdsBatch) {
+      const batchSql = buildGridPagedBatchViaReportItemIdsProc(
+        fields,
+        params,
+        includeHotCase
+      )
+      const batchRequest = pool.request()
+      applyGridRequestInputs(batchRequest, params)
+      const batchResult = await batchRequest.query(batchSql)
+      const parsed = parseGridPagedBatchRecordsets(
+        batchResult.recordsets as Record<string, unknown>[][]
+      )
+      totalCount = parsed.totalCount
+      rows = parsed.rows.map((r) => mapGridRowWithFieldMetadata(r, fields))
+    } else {
+      const { sql: dataSql } = buildGridDataSql(
+        fields,
+        params,
+        includeHotCase,
+        useReportEligibleTvf
+      )
+      const countSql = buildGridCountSql(params, useReportEligibleTvf)
+      const dataRequest = pool.request()
+      applyGridRequestInputs(dataRequest, params)
+      const dataResult = await dataRequest.query(dataSql)
+      const countRequest = pool.request()
+      applyGridRequestInputs(countRequest, params)
+      const countResult = await countRequest.query<{ TotalCount: number }>(
+        countSql
+      )
+      totalCount = countResult.recordset[0]?.TotalCount ?? 0
+      rows = dataResult.recordset.map((r: Record<string, unknown>) =>
+        mapGridRowWithFieldMetadata(r, fields)
+      )
+    }
     res.json({
       columns,
       rows,
@@ -574,46 +665,54 @@ export async function getExport(req: Request, res: Response) {
       viewType: viewTypeRaw,
       state,
       search: (req.query.search as string) ?? null,
-      facilityId: (req.query.facilityId as string) ?? null,
+      facilityIds: parseFacilityIdsFromQuery(req.query as Record<string, unknown>),
       status: (req.query.status as string) ?? null,
       page: 1,
       pageSize: 100_000,
       sortBy: "trackingItemId",
       sortDirection: "asc",
+      includeInactive: queryTruthyFlag(
+        req.query as Record<string, unknown>,
+        "includeInactive",
+        "showAll"
+      ),
     }
     const pool = await getTrackingPool()
-    const fields = await loadGridFieldMetadata(
+    const loaded = await loadGridExportRows(
       pool,
-      companyId,
+      params,
       viewTypeRaw,
       state
     )
-    if (fields.length === 0) {
+    if (!loaded) {
       res.status(400).json({ error: "No fields configured for export." })
       return
     }
-    const columns = buildGridColumnMetadataFromFields(fields)
-    const includeHotCase = await hasIsHotCaseColumn(pool)
-    const { sql: dataSql } = buildGridDataSql(fields, params, includeHotCase)
-    const dataRequest = pool.request()
-    applyGridRequestInputs(dataRequest, params)
-    const dataResult = await dataRequest.query(dataSql)
-    const rows = dataResult.recordset.map((r: Record<string, unknown>) =>
-      mapGridRowWithFieldMetadata(r, fields)
-    )
-    const headers = columns.map((c) => c.title)
-    if (includeHotCase) headers.push("Hot Case")
+    const { columns: rawColumns, rows, includeHotCase } = loaded
+    const keysCsv = parseColumnKeysFromQuery(req.query as Record<string, unknown>)
+    const columns = orderColumnsByKeys(rawColumns, keysCsv)
+    const headers = [
+      ...columns.map((c) => c.title),
+      ...(includeHotCase ? ["Hot Case"] : []),
+      "Active",
+      "Stopped at",
+      "Stopped by",
+    ]
     const sheetData = rows.map((row: Record<string, unknown>) => {
       const values: unknown[] = columns.map((c) => {
         const val = row[c.key]
-        if (val === null || val === undefined) return ""
-        if (c.type === "boolean")
-          return val === true || val === "true" ? "Yes" : "No"
-        return val
+        return formatExportCellValue(val, c)
       })
       if (includeHotCase) {
         values.push(row.isHotCase ? "Yes" : "No")
       }
+      values.push(exportRowActiveLabel(row))
+      values.push(exportRowStoppedAt(row))
+      values.push(
+        row.stoppedBy != null && row.stoppedBy !== ""
+          ? String(row.stoppedBy)
+          : ""
+      )
       return values
     })
     const wsData = [headers, ...sheetData]
@@ -639,6 +738,93 @@ export async function getExport(req: Request, res: Response) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "Export failed."
     res.status(500).json({ error: message })
+  }
+}
+
+export async function getExportPdf(req: Request, res: Response) {
+  try {
+    const companyId = numParam(
+      req.query as Record<string, unknown>,
+      "companyId",
+      "TRACKING_DEFAULT_COMPANY_ID"
+    )
+    if (companyId === null) {
+      res.status(400).json({ error: "companyId is required." })
+      return
+    }
+    const viewTypeRaw = (req.query.viewType as string)?.trim() ?? ""
+    if (!viewTypeRaw || !isValidViewTypeParam(viewTypeRaw)) {
+      res.status(400).json({
+        error: "viewType is required and must be a valid value.",
+      })
+      return
+    }
+    const stateRaw = (req.query.state as string)?.trim() ?? ""
+    const state = stateRaw.length >= 2 ? stateRaw.slice(0, 2).toUpperCase() : null
+    const params: GridQueryParams = {
+      companyId,
+      viewType: viewTypeRaw,
+      state,
+      search: (req.query.search as string) ?? null,
+      facilityIds: parseFacilityIdsFromQuery(req.query as Record<string, unknown>),
+      status: (req.query.status as string) ?? null,
+      page: 1,
+      pageSize: 100_000,
+      sortBy: "trackingItemId",
+      sortDirection: "asc",
+      includeInactive: queryTruthyFlag(
+        req.query as Record<string, unknown>,
+        "includeInactive",
+        "showAll"
+      ),
+    }
+    const pool = await getTrackingPool()
+    const loaded = await loadGridExportRows(
+      pool,
+      params,
+      viewTypeRaw,
+      state
+    )
+    if (!loaded) {
+      res.status(400).json({ error: "No fields configured for export." })
+      return
+    }
+    const { columns: rawColumns, rows, includeHotCase } = loaded
+    const keysCsv = parseColumnKeysFromQuery(req.query as Record<string, unknown>)
+    const columns = orderColumnsByKeys(rawColumns, keysCsv)
+    const headers = [
+      ...columns.map((c) => c.title),
+      ...(includeHotCase ? ["Hot Case"] : []),
+      "Active",
+      "Stopped at",
+      "Stopped by",
+    ]
+    const pdfRows: string[][] = rows.map((row) => {
+      const cells: string[] = columns.map((c) =>
+        formatExportCellValue(row[c.key], c)
+      )
+      if (includeHotCase) cells.push(row.isHotCase ? "Yes" : "No")
+      cells.push(exportRowActiveLabel(row))
+      cells.push(exportRowStoppedAt(row))
+      cells.push(
+        row.stoppedBy != null && row.stoppedBy !== ""
+          ? String(row.stoppedBy)
+          : ""
+      )
+      return cells
+    })
+    const title = `Medicaid Pending List — ${viewTypeRaw} (Company ${companyId})`
+    const filename = `${viewTypeRaw.replace(/[^a-zA-Z0-9]/g, "_")}_export_${new Date().toISOString().slice(0, 10)}.pdf`
+    streamTrackingGridPdf(res, {
+      titleLine: title,
+      headers,
+      rows: pdfRows,
+      filename,
+    })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "PDF export failed."
+    if (!res.headersSent) res.status(500).json({ error: message })
   }
 }
 
@@ -681,15 +867,41 @@ export async function deletePendingItem(req: Request, res: Response) {
       res.status(400).json({ error: "companyId required" })
       return
     }
+    const stoppedBy = stoppedByFromRequest(req)
     const pool = await getTrackingPool()
-    const r = pool.request()
-    r.input("trackingItemId", sql.Int, trackingItemId)
-    r.input("companyId", sql.Int, companyId)
-    await r.query(`
-      UPDATE dbo.PendingTrackingItem
-      SET IsActive = 0
-      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
-    `)
+    const transaction = new sql.Transaction(pool)
+    await transaction.begin()
+    try {
+      const upd = new sql.Request(transaction)
+      upd.input("trackingItemId", sql.Int, trackingItemId)
+      upd.input("companyId", sql.Int, companyId)
+      upd.input("stoppedBy", sql.NVarChar(256), stoppedBy)
+      const updResult = await upd.query(`
+        UPDATE dbo.TrackingItemsTbl
+        SET IsActive = 0,
+            StoppedAt = SYSUTCDATETIME(),
+            StoppedBy = @stoppedBy
+        WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      `)
+      const n = updResult.rowsAffected?.[0] ?? 0
+      if (!n) {
+        await transaction.rollback()
+        res.status(404).json({ error: "Not found or access denied." })
+        return
+      }
+      const ins = new sql.Request(transaction)
+      ins.input("trackingItemId", sql.Int, trackingItemId)
+      ins.input("companyId", sql.Int, companyId)
+      ins.input("stoppedBy", sql.NVarChar(256), stoppedBy)
+      await ins.query(`
+        INSERT INTO dbo.TrackingItemStopAudit (TrackingItemId, CompanyId, StoppedBy)
+        VALUES (@trackingItemId, @companyId, @stoppedBy)
+      `)
+      await transaction.commit()
+    } catch (e) {
+      await transaction.rollback()
+      throw e
+    }
     res.json({ ok: true })
   } catch (error) {
     const message =
@@ -766,7 +978,7 @@ export async function patchHotCase(req: Request, res: Response) {
     r.input("companyId", sql.Int, companyId)
     r.input("isHotCase", sql.Bit, parsed.data.isHotCase ? 1 : 0)
     await r.query(`
-      UPDATE dbo.PendingTrackingItem
+      UPDATE dbo.TrackingItemsTbl
       SET IsHotCase = @isHotCase
       WHERE TrackingItemId = @trackingItemId
         AND CompanyId = @companyId
@@ -797,10 +1009,12 @@ export async function getNotes(req: Request, res: Response) {
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
     const result = await r.query(`
-      SELECT NoteId, NoteType, Body, CreatedAt, CreatedBy
+      SELECT NoteId, NoteType, Body, CreatedAt, CreatedBy,
+        CAST(ISNULL(IsPinned, 0) AS BIT) AS IsPinned,
+        CAST(ISNULL(IsHighlighted, 0) AS BIT) AS IsHighlighted
       FROM dbo.ResidentNote
       WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
-      ORDER BY CreatedAt DESC
+      ORDER BY CASE WHEN ISNULL(IsPinned, 0) = 1 THEN 0 ELSE 1 END, CreatedAt DESC
     `)
     const notes = result.recordset.map((row: Record<string, unknown>) => ({
       noteId: row.NoteId,
@@ -811,6 +1025,8 @@ export async function getNotes(req: Request, res: Response) {
         : new Date(row.CreatedAt as string)
       ).toISOString(),
       createdBy: row.CreatedBy,
+      isPinned: Boolean(row.IsPinned),
+      isHighlighted: Boolean(row.IsHighlighted),
     }))
     res.json({ notes })
   } catch (error) {
@@ -823,6 +1039,8 @@ const postNoteSchema = z.object({
   companyId: z.coerce.number(),
   body: z.string().min(1),
   noteType: z.string().optional(),
+  isPinned: z.boolean().optional(),
+  isHighlighted: z.boolean().optional(),
 })
 
 export async function postNote(req: Request, res: Response) {
@@ -840,6 +1058,8 @@ export async function postNote(req: Request, res: Response) {
     const validTypes = ["CaseNote", "Internal", "External"]
     const rawType = parsed.data.noteType?.trim() ?? ""
     const noteType = validTypes.includes(rawType) ? rawType : "CaseNote"
+    const isPinned = parsed.data.isPinned ? 1 : 0
+    const isHighlighted = parsed.data.isHighlighted ? 1 : 0
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
@@ -847,10 +1067,12 @@ export async function postNote(req: Request, res: Response) {
     r.input("noteType", sql.NVarChar(50), noteType)
     r.input("body", sql.NVarChar(sql.MAX), parsed.data.body.trim())
     r.input("createdBy", sql.NVarChar(256), "system")
+    r.input("isPinned", sql.Bit, isPinned)
+    r.input("isHighlighted", sql.Bit, isHighlighted)
     const result = await r.query<{ NoteId: number }>(`
-      INSERT INTO dbo.ResidentNote (TrackingItemId, CompanyId, NoteType, Body, CreatedBy)
+      INSERT INTO dbo.ResidentNote (TrackingItemId, CompanyId, NoteType, Body, CreatedBy, IsPinned, IsHighlighted)
       OUTPUT INSERTED.NoteId
-      VALUES (@trackingItemId, @companyId, @noteType, @body, @createdBy)
+      VALUES (@trackingItemId, @companyId, @noteType, @body, @createdBy, @isPinned, @isHighlighted)
     `)
     const noteId = Number(result.recordset[0]?.NoteId)
     res.json({ ok: true, noteId })
@@ -864,7 +1086,13 @@ export async function patchNote(req: Request, res: Response) {
   try {
     const trackingItemId = Number(req.params.trackingItemId)
     const noteId = Number(req.params.noteId)
-    const json = req.body as { companyId?: number; body?: string; noteType?: string }
+    const json = req.body as {
+      companyId?: number
+      body?: string
+      noteType?: string
+      isPinned?: boolean
+      isHighlighted?: boolean
+    }
     const companyId = Number(
       json.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
     )
@@ -887,8 +1115,20 @@ export async function patchNote(req: Request, res: Response) {
       r.input("body", sql.NVarChar(sql.MAX), json.body)
     }
     if (json.noteType != null) {
-      sets.push("NoteType = @noteType")
-      r.input("noteType", sql.NVarChar(50), json.noteType)
+      const validTypes = ["CaseNote", "Internal", "External"]
+      const nt = String(json.noteType).trim()
+      if (validTypes.includes(nt)) {
+        sets.push("NoteType = @noteType")
+        r.input("noteType", sql.NVarChar(50), nt)
+      }
+    }
+    if (typeof json.isPinned === "boolean") {
+      sets.push("IsPinned = @isPinned")
+      r.input("isPinned", sql.Bit, json.isPinned ? 1 : 0)
+    }
+    if (typeof json.isHighlighted === "boolean") {
+      sets.push("IsHighlighted = @isHighlighted")
+      r.input("isHighlighted", sql.Bit, json.isHighlighted ? 1 : 0)
     }
     if (sets.length === 0) {
       res.status(400).json({ error: "Nothing to update" })
@@ -1491,6 +1731,136 @@ function dataTypeFromFormula(def: FormulaDefinition): string {
   }
 }
 
+function mapSqlTypeToFieldDataType(sqlType: string): string {
+  const t = sqlType.toLowerCase()
+  if (
+    ["varchar", "nvarchar", "char", "nchar", "text", "ntext"].includes(t)
+  )
+    return "text"
+  if (["money", "smallmoney"].includes(t)) return "currency"
+  if (
+    [
+      "decimal",
+      "numeric",
+      "float",
+      "real",
+      "int",
+      "bigint",
+      "smallint",
+      "tinyint",
+    ].includes(t)
+  )
+    return "number"
+  if (["date", "datetime", "datetime2", "smalldatetime", "datetimeoffset"].includes(t))
+    return "date"
+  if (t === "bit") return "boolean"
+  return "text"
+}
+
+async function hasFieldMetadataViewOrderTable(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>
+): Promise<boolean> {
+  const r = await pool.request().query(`
+    SELECT 1 AS x FROM sys.tables
+    WHERE schema_id = SCHEMA_ID(N'dbo') AND name = N'FieldMetadataViewOrder'
+  `)
+  return r.recordset.length > 0
+}
+
+async function assertTrackingItemColumnExists(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  columnName: string
+): Promise<void> {
+  const name = columnName.trim()
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
+    throw new Error(
+      "Invalid column name: use letters, numbers, underscore; start with letter or _."
+    )
+  }
+  const r = await pool.request().input("c", sql.NVarChar(128), name).query(`
+    SELECT 1 AS x FROM sys.columns
+    WHERE object_id = OBJECT_ID(N'dbo.TrackingItemsTbl') AND name = @c
+  `)
+  if (r.recordset.length === 0) {
+    throw new Error(
+      `Column "${name}" was not found on dbo.TrackingItemsTbl. Add the column in SQL Server first.`
+    )
+  }
+}
+
+async function upsertFieldMetadataViewOrders(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  fieldMetadataId: number,
+  rows: { viewType: string; displayOrder: number }[]
+): Promise<void> {
+  if (rows.length === 0) return
+  if (!(await hasFieldMetadataViewOrderTable(pool))) return
+  for (const row of rows) {
+    const vt = row.viewType.trim()
+    if (!vt) continue
+    const ord = Number.isFinite(row.displayOrder)
+      ? Math.trunc(row.displayOrder)
+      : 0
+    const ins = pool.request()
+    ins.input("fid", sql.Int, fieldMetadataId)
+    ins.input("vt", sql.NVarChar(100), vt)
+    ins.input("ord", sql.Int, ord)
+    await ins.query(`
+      MERGE dbo.FieldMetadataViewOrder AS t
+      USING (SELECT @fid AS FieldMetadataId, @vt AS ViewType) AS s
+      ON t.FieldMetadataId = s.FieldMetadataId AND t.ViewType = s.ViewType
+      WHEN MATCHED THEN UPDATE SET DisplayOrder = @ord
+      WHEN NOT MATCHED THEN
+        INSERT (FieldMetadataId, ViewType, DisplayOrder)
+        VALUES (@fid, @vt, @ord);
+    `)
+  }
+}
+
+export async function getAdminTrackingItemColumns(req: Request, res: Response) {
+  try {
+    const companyId = Number(
+      req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
+    )
+    if (!Number.isFinite(companyId)) {
+      res.status(400).json({ error: "companyId required" })
+      return
+    }
+    const pool = await getTrackingPool()
+    const cols = await pool.request().query<{
+      ColumnName: string
+      DataType: string
+    }>(`
+      SELECT c.COLUMN_NAME AS ColumnName, c.DATA_TYPE AS DataType
+      FROM INFORMATION_SCHEMA.COLUMNS c
+      WHERE c.TABLE_SCHEMA = N'dbo'
+        AND c.TABLE_NAME = N'TrackingItemsTbl'
+      ORDER BY c.ORDINAL_POSITION
+    `)
+    const fm = await pool.request().input("companyId", sql.Int, companyId)
+      .query<{ FieldName: string }>(`
+      SELECT FieldName FROM dbo.FieldMetadata WHERE CompanyId = @companyId
+    `)
+    const used = new Set(
+      fm.recordset.map((r) => String(r.FieldName).trim().toLowerCase())
+    )
+    const columns = cols.recordset.map((row) => {
+      const columnName = String(row.ColumnName)
+      return {
+        columnName,
+        sqlDataType: String(row.DataType),
+        suggestedDataType: mapSqlTypeToFieldDataType(String(row.DataType)),
+        hasFieldMetadata: used.has(columnName.toLowerCase()),
+      }
+    })
+    res.json({ columns })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to load table columns."
+    res.status(500).json({ error: message, columns: [] })
+  }
+}
+
 export async function getAdminFieldMetadata(req: Request, res: Response) {
   try {
     const companyId = Number(
@@ -1522,7 +1892,7 @@ export async function getAdminFieldMetadata(req: Request, res: Response) {
     vtReq.input("companyId", sql.Int, companyId)
     const vtCompany = await vtReq.query<{ ViewType: string }>(`
       SELECT DISTINCT LTRIM(RTRIM(ti.ViewType)) AS ViewType
-      FROM dbo.PendingTrackingItem ti
+      FROM dbo.TrackingItemsTbl ti
       WHERE ti.CompanyId = @companyId
         AND ti.IsActive = 1
         AND ti.ViewType IS NOT NULL
@@ -1641,9 +2011,20 @@ const postFieldMetaSchema = z.object({
   isActive: z.boolean().optional(),
   isRequired: z.boolean().optional(),
   isEditable: z.boolean().optional(),
+  isSystemField: z.boolean().optional(),
+  sourceType: z.enum(["BaseTable", "Custom"]).optional(),
+  sourceColumnName: z.string().optional().nullable(),
   viewTypes: z.array(z.string()).optional(),
   payerTypes: z.array(z.string()).optional(),
   states: z.array(z.string()).optional(),
+  viewOrders: z
+    .array(
+      z.object({
+        viewType: z.string().min(1),
+        displayOrder: z.coerce.number(),
+      })
+    )
+    .optional(),
   fieldKind: z.enum(["regular", "calculated"]).optional(),
   formulaDefinition: z.unknown().optional(),
 })
@@ -1663,6 +2044,17 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
     const kind = body.fieldKind === "calculated" ? "calculated" : "regular"
     let formulaJson: string | null = null
     let dataTypeOut = body.dataType?.trim() ?? "text"
+
+    const sourceTypeIn: "BaseTable" | "Custom" =
+      kind === "calculated"
+        ? "Custom"
+        : body.sourceType === "BaseTable"
+          ? "BaseTable"
+          : "Custom"
+
+    let sourceColumnNameOut: string | null = null
+    let fieldNameFinal = body.fieldName.trim()
+
     if (kind === "calculated") {
       const fp = formulaDefinitionSchema.safeParse(body.formulaDefinition)
       if (!fp.success) {
@@ -1674,7 +2066,19 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
       }
       formulaJson = JSON.stringify(fp.data)
       dataTypeOut = dataTypeFromFormula(fp.data)
+    } else if (sourceTypeIn === "BaseTable") {
+      const col = body.sourceColumnName?.trim()
+      if (!col) {
+        res.status(400).json({
+          error: "sourceColumnName is required when sourceType is BaseTable.",
+        })
+        return
+      }
+      await assertTrackingItemColumnExists(pool, col)
+      sourceColumnNameOut = col
+      fieldNameFinal = col
     }
+
     const hasFf = await hasFieldFormulaColumns(pool)
     if (kind === "calculated" && !hasFf) {
       res.status(400).json({
@@ -1683,6 +2087,21 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
       })
       return
     }
+
+    const dupReq = pool.request()
+    dupReq.input("companyId", sql.Int, body.companyId)
+    dupReq.input("fn", sql.NVarChar(128), fieldNameFinal)
+    const dup = await dupReq.query(`
+      SELECT 1 AS x FROM dbo.FieldMetadata
+      WHERE CompanyId = @companyId AND FieldName = @fn
+    `)
+    if (dup.recordset.length > 0) {
+      res.status(400).json({
+        error: `A field named "${fieldNameFinal}" already exists for this company.`,
+      })
+      return
+    }
+
     const isActive = body.isActive !== undefined ? (body.isActive ? 1 : 0) : 1
     const isRequired =
       kind === "calculated"
@@ -1696,9 +2115,16 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
         : body.isEditable !== undefined
           ? (body.isEditable ? 1 : 0)
           : 1
+    const isSystemBit =
+      kind === "calculated"
+        ? 0
+        : body.isSystemField !== undefined
+          ? (body.isSystemField ? 1 : 0)
+          : 0
+
     const r = pool.request()
     r.input("companyId", sql.Int, body.companyId)
-    r.input("fieldName", sql.NVarChar(128), body.fieldName.trim())
+    r.input("fieldName", sql.NVarChar(128), fieldNameFinal)
     r.input("displayName", sql.NVarChar(256), body.displayName.trim())
     r.input("dataType", sql.NVarChar(50), dataTypeOut)
     r.input("screenLocation", sql.NVarChar(20), screenLocation)
@@ -1706,14 +2132,22 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
     r.input("isActive", sql.Bit, isActive)
     r.input("isRequired", sql.Bit, isRequired)
     r.input("isEditable", sql.Bit, isEditable)
+    r.input("isSystemField", sql.Bit, isSystemBit)
+    r.input(
+      "sourceType",
+      sql.NVarChar(20),
+      sourceTypeIn === "BaseTable" ? "BaseTable" : "Custom"
+    )
+    r.input(
+      "sourceColumnName",
+      sql.NVarChar(128),
+      sourceTypeIn === "BaseTable" ? sourceColumnNameOut : null
+    )
+
     let insertResult: { recordset: { FieldMetadataId: number }[] }
     if (hasFf) {
       r.input("fieldKind", sql.NVarChar(20), kind)
-      r.input(
-        "formulaJson",
-        sql.NVarChar(sql.MAX),
-        formulaJson
-      )
+      r.input("formulaJson", sql.NVarChar(sql.MAX), formulaJson)
       insertResult = await r.query<{ FieldMetadataId: number }>(`
         INSERT INTO dbo.FieldMetadata (
           CompanyId, FieldName, DisplayName, DataType, ScreenLocation, DisplayOrder,
@@ -1723,7 +2157,7 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
         OUTPUT INSERTED.FieldMetadataId
         VALUES (
           @companyId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
-          @isActive, @isRequired, @isEditable, 0, N'Custom', NULL,
+          @isActive, @isRequired, @isEditable, @isSystemField, @sourceType, @sourceColumnName,
           @fieldKind, @formulaJson
         )
       `)
@@ -1736,7 +2170,7 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
         OUTPUT INSERTED.FieldMetadataId
         VALUES (
           @companyId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
-          @isActive, @isRequired, @isEditable, 0, N'Custom', NULL
+          @isActive, @isRequired, @isEditable, @isSystemField, @sourceType, @sourceColumnName
         )
       `)
     }
@@ -1748,6 +2182,7 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
     const vt = body.viewTypes ?? body.payerTypes ?? []
     await replacePayerTypes(pool, fieldMetadataId, vt)
     await replaceStates(pool, fieldMetadataId, body.states ?? [])
+    await upsertFieldMetadataViewOrders(pool, fieldMetadataId, body.viewOrders ?? [])
     res.json({ ok: true, fieldMetadataId })
   } catch (error) {
     const message =

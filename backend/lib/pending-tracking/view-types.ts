@@ -1,6 +1,6 @@
 /**
  * View-type tabs are loaded from GET /api/pending-tracking/view-types
- * (distinct PendingTrackingItem.ViewType per facility).
+ * (distinct TrackingItemsTbl.ViewType per facility).
  */
 
 /** Basic sanity check for grid API (values come from DB, not a fixed allowlist). */

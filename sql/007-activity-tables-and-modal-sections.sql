@@ -99,7 +99,7 @@ BEGIN
       CHECK (Status IN (N'Open', N'InProgress', N'Completed', N'Cancelled')),
     CONSTRAINT FK_ResidentTask_TrackingItem
       FOREIGN KEY (TrackingItemId)
-      REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentTask_TrackingItem
     ON dbo.ResidentTask (TrackingItemId, Status);
@@ -127,7 +127,7 @@ BEGIN
       CHECK (NoteType IN (N'CaseNote', N'Internal', N'External')),
     CONSTRAINT FK_ResidentNote_TrackingItem
       FOREIGN KEY (TrackingItemId)
-      REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentNote_TrackingItem
     ON dbo.ResidentNote (TrackingItemId, CreatedAt);
@@ -160,7 +160,7 @@ BEGIN
       CHECK (Status IN (N'Sent', N'Failed', N'Queued')),
     CONSTRAINT FK_ResidentEmail_TrackingItem
       FOREIGN KEY (TrackingItemId)
-      REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentEmail_TrackingItem
     ON dbo.ResidentEmail (TrackingItemId, SentAt);
@@ -216,7 +216,7 @@ BEGIN
     CONSTRAINT PK_ResidentAttachment PRIMARY KEY CLUSTERED (AttachmentId),
     CONSTRAINT FK_ResidentAttachment_TrackingItem
       FOREIGN KEY (TrackingItemId)
-      REFERENCES dbo.PendingTrackingItem (TrackingItemId) ON DELETE CASCADE
+      REFERENCES dbo.TrackingItemsTbl (TrackingItemId) ON DELETE CASCADE
   );
   CREATE NONCLUSTERED INDEX IX_ResidentAttachment_TrackingItem
     ON dbo.ResidentAttachment (TrackingItemId, IsDeleted, UploadedAt);

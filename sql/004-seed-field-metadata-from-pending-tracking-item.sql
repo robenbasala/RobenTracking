@@ -1,5 +1,5 @@
 /*
-  Seeds dbo.FieldMetadata from dbo.PendingTrackingItem columns (one row per column per company).
+  Seeds dbo.FieldMetadata from dbo.TrackingItemsTbl columns (one row per column per company).
   Maps SQL types to metadata DataType. Sets SourceType = BaseTable, IsSystemField = 1.
   ScreenLocation: first pass sets all to Detail; optionally move Main fields in admin.
   Safe to re-run: skips existing (CompanyId, FieldName).
@@ -14,9 +14,9 @@ GO
 
 DECLARE @CompanyId INT = 1; /* <-- change per tenant */
 
-IF OBJECT_ID(N'dbo.PendingTrackingItem', N'U') IS NULL
+IF OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NULL
 BEGIN
-  RAISERROR('PendingTrackingItem not found.', 16, 1);
+  RAISERROR('TrackingItemsTbl not found.', 16, 1);
   RETURN;
 END
 
@@ -53,7 +53,7 @@ SELECT
   SourceColumnName = c.COLUMN_NAME
 FROM INFORMATION_SCHEMA.COLUMNS c
 WHERE c.TABLE_SCHEMA = N''dbo''
-  AND c.TABLE_NAME = N''PendingTrackingItem''
+  AND c.TABLE_NAME = N''TrackingItemsTbl''
   AND NOT EXISTS (
     SELECT 1 FROM dbo.FieldMetadata fm
     WHERE fm.CompanyId = @CompanyId AND fm.FieldName = c.COLUMN_NAME

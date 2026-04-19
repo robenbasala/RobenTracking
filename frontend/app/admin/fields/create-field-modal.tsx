@@ -1,6 +1,6 @@
 "use client"
 
-import { apiPost } from "@/services/api"
+import { apiGet, apiPost } from "@/services/api"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
 import type {
@@ -12,9 +12,16 @@ import type {
   FormulaOperand,
 } from "@/types/field-formula"
 import { X } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 export type ExistingFieldRef = { fieldName: string; dataType: string }
+
+type TrackingColumnRow = {
+  columnName: string
+  sqlDataType: string
+  suggestedDataType: string
+  hasFieldMetadata: boolean
+}
 
 const COMPARISON_OPTIONS: { value: ComparisonOperator; label: string }[] = [
   { value: "equals", label: "Equals" },
@@ -145,6 +152,17 @@ export function CreateFieldModal({
   const [newCreateOptOrder, setNewCreateOptOrder] = useState(0)
 
   const [fieldKind, setFieldKind] = useState<FieldKind>("regular")
+  const [storageMode, setStorageMode] = useState<"custom" | "baseTable">(
+    "custom"
+  )
+  const [trackingColumns, setTrackingColumns] = useState<TrackingColumnRow[]>(
+    []
+  )
+  const [columnsLoading, setColumnsLoading] = useState(false)
+  const [columnsErr, setColumnsErr] = useState<string | null>(null)
+  const [selectedBaseColumn, setSelectedBaseColumn] = useState("")
+  const [isSystemField, setIsSystemField] = useState(false)
+  const [perViewOrder, setPerViewOrder] = useState<Record<string, number>>({})
   const [calcType, setCalcType] = useState<CalculationType>("date_arithmetic")
   const [dateSource, setDateSource] = useState("")
   const [dateOp, setDateOp] = useState<"add_days" | "subtract_days">("add_days")
@@ -193,10 +211,62 @@ export function CreateFieldModal({
   function toggleCreateViewType(vt: string) {
     setCreateViewTypes((prev) => {
       const next = new Set(prev)
-      if (next.has(vt)) next.delete(vt)
-      else next.add(vt)
+      if (next.has(vt)) {
+        next.delete(vt)
+        setPerViewOrder((po) => {
+          const { [vt]: _removed, ...rest } = po
+          return rest
+        })
+      } else {
+        next.add(vt)
+        setPerViewOrder((po) => ({
+          ...po,
+          [vt]: po[vt] ?? displayOrder,
+        }))
+      }
       return next
     })
+  }
+
+  useEffect(() => {
+    if (fieldKind !== "regular" || storageMode !== "baseTable") return
+    let cancelled = false
+    setColumnsLoading(true)
+    setColumnsErr(null)
+    void (async () => {
+      try {
+        const res = await apiGet(
+          `/api/admin/field-metadata/tracking-columns?companyId=${companyId}`
+        )
+        const data = (await res.json()) as {
+          columns?: TrackingColumnRow[]
+          error?: string
+        }
+        if (!res.ok) throw new Error(data.error ?? "Failed to load columns")
+        if (!cancelled) {
+          setTrackingColumns(data.columns ?? [])
+        }
+      } catch (e) {
+        if (!cancelled) {
+          setColumnsErr(e instanceof Error ? e.message : "Load error")
+          setTrackingColumns([])
+        }
+      } finally {
+        if (!cancelled) setColumnsLoading(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [companyId, fieldKind, storageMode])
+
+  function onSelectBaseColumn(columnName: string) {
+    setSelectedBaseColumn(columnName)
+    const row = trackingColumns.find((c) => c.columnName === columnName)
+    if (row) {
+      setFieldName(row.columnName)
+      setDataType(row.suggestedDataType)
+    }
   }
 
   function addCreateOption() {
@@ -301,6 +371,19 @@ export function CreateFieldModal({
     setErr(null)
     const fn = fieldName.trim()
     const dn = displayName.trim()
+    if (fieldKind === "regular" && storageMode === "baseTable") {
+      if (!selectedBaseColumn.trim()) {
+        setErr("Select a TrackingItemsTbl column.")
+        return
+      }
+      const sel = trackingColumns.find(
+        (c) => c.columnName === selectedBaseColumn
+      )
+      if (sel?.hasFieldMetadata) {
+        setErr("This column already has field metadata for this company.")
+        return
+      }
+    }
     if (!fn || !dn) {
       setErr("Field name and display name are required.")
       return
@@ -317,6 +400,10 @@ export function CreateFieldModal({
       .map((s) => s.trim().toUpperCase())
       .filter((s) => s.length === 2)
     const viewTypes = Array.from(createViewTypes)
+    const viewOrders = viewTypes.map((vt) => ({
+      viewType: vt,
+      displayOrder: perViewOrder[vt] ?? displayOrder,
+    }))
     const doNum = Number(displayOrder)
     const formulaDefinition = buildFormula()
     const effectiveRequired = fieldKind === "calculated" ? false : isRequired
@@ -351,6 +438,16 @@ export function CreateFieldModal({
         isEditable: effectiveEditable,
         viewTypes,
         states,
+        viewOrders,
+        ...(fieldKind === "regular" && storageMode === "baseTable"
+          ? {
+              sourceType: "BaseTable" as const,
+              sourceColumnName: selectedBaseColumn.trim(),
+              isSystemField,
+            }
+          : fieldKind === "regular"
+            ? { sourceType: "Custom" as const }
+            : {}),
         fieldKind,
         ...(fieldKind === "calculated" && formulaDefinition
           ? { formulaDefinition }
@@ -410,18 +507,89 @@ export function CreateFieldModal({
             <select
               className="border-input bg-background mt-1 w-full rounded-md border px-3 py-2 text-sm"
               value={fieldKind}
-              onChange={(e) => setFieldKind(e.target.value as FieldKind)}
+              onChange={(e) => {
+                const v = e.target.value as FieldKind
+                setFieldKind(v)
+                if (v === "calculated") {
+                  setStorageMode("custom")
+                  setSelectedBaseColumn("")
+                }
+              }}
             >
               <option value="regular">Regular</option>
               <option value="calculated">Calculated</option>
             </select>
           </label>
+          {!isCalculated && (
+            <label className="text-muted-foreground block text-xs font-medium">
+              Backing storage
+              <select
+                className="border-input bg-background mt-1 w-full rounded-md border px-3 py-2 text-sm"
+                value={storageMode}
+                onChange={(e) => {
+                  const m = e.target.value as "custom" | "baseTable"
+                  setStorageMode(m)
+                  if (m === "custom") {
+                    setSelectedBaseColumn("")
+                  }
+                }}
+              >
+                <option value="custom">Custom (virtual column)</option>
+                <option value="baseTable">TrackingItemsTbl column</option>
+              </select>
+            </label>
+          )}
+          {!isCalculated && storageMode === "baseTable" && (
+            <div className="border-input bg-muted/15 space-y-2 rounded-lg border p-3">
+              {columnsLoading && (
+                <p className="text-muted-foreground text-xs">
+                  Loading table columns…
+                </p>
+              )}
+              {columnsErr && (
+                <p className="text-destructive text-xs">{columnsErr}</p>
+              )}
+              <label className="text-muted-foreground block text-xs font-medium">
+                Physical column
+                <select
+                  className="border-input bg-background mt-1 w-full rounded-md border px-3 py-2 text-sm"
+                  value={selectedBaseColumn}
+                  onChange={(e) => onSelectBaseColumn(e.target.value)}
+                >
+                  <option value="">Select column…</option>
+                  {trackingColumns.map((c) => (
+                    <option
+                      key={c.columnName}
+                      value={c.columnName}
+                      disabled={c.hasFieldMetadata}
+                    >
+                      {c.columnName} ({c.sqlDataType})
+                      {c.hasFieldMetadata ? " — already mapped" : ""}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="flex cursor-pointer items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={isSystemField}
+                  onChange={(e) => setIsSystemField(e.target.checked)}
+                />
+                System field
+              </label>
+              <p className="text-muted-foreground text-[11px] leading-snug">
+                Field name is taken from the column name. Add display metadata,
+                views, and states below.
+              </p>
+            </div>
+          )}
           <label className="text-muted-foreground block text-xs font-medium">
             Field name (code)
             <input
-              className="border-input bg-background mt-1 w-full rounded-md border px-3 py-2 text-sm"
+              className="border-input bg-background mt-1 w-full rounded-md border px-3 py-2 text-sm disabled:opacity-60"
               value={fieldName}
               onChange={(e) => setFieldName(e.target.value)}
+              disabled={!isCalculated && storageMode === "baseTable"}
               placeholder="e.g. FollowUpDate"
             />
           </label>
@@ -682,28 +850,47 @@ export function CreateFieldModal({
           )}
           <div>
             <p className="text-muted-foreground text-xs font-medium">
-              View type (PendingTrackingItem.ViewType)
+              View type (TrackingItemsTbl.ViewType)
             </p>
             <p className="text-muted-foreground/90 mb-2 text-[11px]">
               Leave none checked to show for every view type.
             </p>
             {viewTypeOptions.length === 0 ? (
               <p className="text-muted-foreground rounded-md border border-dashed px-3 py-2 text-xs">
-                No view types in PendingTrackingItem for this company.
+                No view types in TrackingItemsTbl for this company.
               </p>
             ) : (
               <div className="border-input bg-muted/20 flex max-h-40 flex-col gap-2 overflow-y-auto rounded-md border p-3">
                 {viewTypeOptions.map((vt) => (
-                  <label
+                  <div
                     key={vt}
-                    className="flex cursor-pointer items-center gap-2 text-sm leading-none"
+                    className="flex flex-wrap items-center gap-2 text-sm leading-none"
                   >
-                    <Checkbox
-                      checked={createViewTypes.has(vt)}
-                      onCheckedChange={() => toggleCreateViewType(vt)}
-                    />
-                    <span>{vt}</span>
-                  </label>
+                    <label className="flex min-w-0 flex-1 cursor-pointer items-center gap-2">
+                      <Checkbox
+                        checked={createViewTypes.has(vt)}
+                        onCheckedChange={() => toggleCreateViewType(vt)}
+                      />
+                      <span className="truncate">{vt}</span>
+                    </label>
+                    {createViewTypes.has(vt) && (
+                      <label className="text-muted-foreground flex items-center gap-1 text-[11px]">
+                        Order
+                        <input
+                          type="number"
+                          className="border-input bg-background w-16 rounded-md border px-1.5 py-1 text-xs"
+                          title="Display order for this view (FieldMetadataViewOrder)"
+                          value={perViewOrder[vt] ?? displayOrder}
+                          onChange={(e) =>
+                            setPerViewOrder((po) => ({
+                              ...po,
+                              [vt]: Number(e.target.value),
+                            }))
+                          }
+                        />
+                      </label>
+                    )}
+                  </div>
                 ))}
               </div>
             )}

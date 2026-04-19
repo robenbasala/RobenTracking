@@ -3,7 +3,7 @@
  * Connection string: set TRACKING_DB_CONNECTION_STRING in .env.local (see repo root).
  *
  * On first connect: creates dbo.FieldMetadata (and related tables) if missing,
- * then seeds FieldMetadata from PendingTrackingItem columns when FieldMetadata is empty
+ * then seeds FieldMetadata from TrackingItemsTbl columns when FieldMetadata is empty
  * (disable with TRACKING_AUTO_SEED_FIELD_METADATA=0).
  * Skip DDL with TRACKING_SKIP_AUTO_FIELD_METADATA_SCHEMA=1 (DBA-managed schema).
  */
@@ -153,10 +153,10 @@ async function runColumnMigrations(p: sql.ConnectionPool): Promise<void> {
     `IF OBJECT_ID(N'dbo.ResidentEmail', N'U') IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ResidentEmail') AND name = N'CcEmails')
        EXEC sp_executesql N'ALTER TABLE dbo.ResidentEmail ADD CcEmails NVARCHAR(MAX) NULL'`,
-    // PendingTrackingItem.IsHotCase
-    `IF OBJECT_ID(N'dbo.PendingTrackingItem', N'U') IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.PendingTrackingItem') AND name = N'IsHotCase')
-       EXEC sp_executesql N'ALTER TABLE dbo.PendingTrackingItem ADD IsHotCase BIT NOT NULL DEFAULT 0'`,
+    // TrackingItemsTbl.IsHotCase
+    `IF OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TrackingItemsTbl') AND name = N'IsHotCase')
+       EXEC sp_executesql N'ALTER TABLE dbo.TrackingItemsTbl ADD IsHotCase BIT NOT NULL DEFAULT 0'`,
   ]
 
   for (const stmt of migrations) {

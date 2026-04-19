@@ -1,11 +1,15 @@
 "use client"
 
-import { apiGet, apiUrl } from "@/services/api"
+import { apiGet, downloadExportFile } from "@/services/api"
+import { columnKeysForExportQuery } from "@/lib/pending-tracking/grid-column-preferences"
 import { MainAppShell } from "@/components/main-app-shell"
 import { FilterBar, type ViewTypeTab, type FacilityOption } from "@/components/filter-bar"
 import { PendingTrackingGrid } from "@/components/pending-tracking-grid"
 import { UserPlus } from "lucide-react"
 import { useCallback, useEffect, useMemo, useState } from "react"
+import { Label } from "@/components/ui/label"
+import { Switch } from "@/components/ui/switch"
+import { toast } from "sonner"
 
 const DEFAULT_COMPANY_ID = Number(
   process.env.NEXT_PUBLIC_TRACKING_DEFAULT_COMPANY_ID ?? "1"
@@ -26,7 +30,20 @@ export default function TrackingPage() {
   const [searchInput, setSearchInput] = useState("")
   const [debouncedSearch, setDebouncedSearch] = useState("")
   const [facilities, setFacilities] = useState<FacilityOption[]>([])
-  const [facilityFilter, setFacilityFilter] = useState("")
+  const [facilityFilterIds, setFacilityFilterIds] = useState<string[]>(() =>
+    DEFAULT_FACILITY_ID ? [DEFAULT_FACILITY_ID] : []
+  )
+  const [showAllInactive, setShowAllInactive] = useState(false)
+
+  const facilityScopeKey = useMemo(
+    () => [...facilityFilterIds].sort().join("|"),
+    [facilityFilterIds]
+  )
+
+  const activeReportTitle = useMemo(() => {
+    const tab = viewTypeTabs.find((t) => t.viewType === activeViewType)
+    return tab?.label?.trim() || "Pending tracking"
+  }, [viewTypeTabs, activeViewType])
 
   useEffect(() => {
     const t = setTimeout(() => setDebouncedSearch(searchInput.trim()), 400)
@@ -48,7 +65,8 @@ export default function TrackingPage() {
     try {
       const params = new URLSearchParams()
       params.set("companyId", String(companyId))
-      if (DEFAULT_FACILITY_ID) params.set("facilityId", DEFAULT_FACILITY_ID)
+      if (facilityFilterIds.length > 0)
+        params.set("facilityIds", facilityFilterIds.join(","))
 
       const res = await apiGet(`/api/pending-tracking/view-types?${params}`, {
         cache: "no-store",
@@ -90,7 +108,7 @@ export default function TrackingPage() {
       clearTimeout(timeoutId)
       setTabsLoading(false)
     }
-  }, [companyId])
+  }, [companyId, facilityFilterIds])
 
   useEffect(() => {
     void loadViewTypes()
@@ -113,31 +131,71 @@ export default function TrackingPage() {
     void loadFacilities()
   }, [companyId])
 
-  const handleExport = useCallback(() => {
+  const handleExport = useCallback(async () => {
     if (!activeViewType) return
     const params = new URLSearchParams()
     params.set("companyId", String(companyId))
     params.set("viewType", activeViewType)
     if (DEFAULT_STATE) params.set("state", DEFAULT_STATE)
-    if (facilityFilter || DEFAULT_FACILITY_ID)
-      params.set("facilityId", facilityFilter || DEFAULT_FACILITY_ID)
+    if (facilityFilterIds.length > 0)
+      params.set("facilityIds", facilityFilterIds.join(","))
     if (debouncedSearch) params.set("search", debouncedSearch)
-    window.open(apiUrl(`/api/pending-tracking/export?${params}`), "_blank")
-  }, [companyId, activeViewType, facilityFilter, debouncedSearch])
+    if (showAllInactive) params.set("includeInactive", "1")
+    const colKeys = columnKeysForExportQuery(companyId, activeViewType)
+    if (colKeys) params.set("columnKeys", colKeys)
+    const safe = `${activeViewType.replace(/[^a-zA-Z0-9]/g, "_")}_export.xlsx`
+    const id = "export-excel"
+    try {
+      toast.loading("Preparing Excel…", { id })
+      await downloadExportFile(
+        `/api/pending-tracking/export?${params}`,
+        safe
+      )
+      toast.success("Download started", { id })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Export failed", { id })
+    }
+  }, [companyId, activeViewType, facilityFilterIds, debouncedSearch, showAllInactive])
+
+  const handleExportPdf = useCallback(async () => {
+    if (!activeViewType) return
+    const params = new URLSearchParams()
+    params.set("companyId", String(companyId))
+    params.set("viewType", activeViewType)
+    if (DEFAULT_STATE) params.set("state", DEFAULT_STATE)
+    if (facilityFilterIds.length > 0)
+      params.set("facilityIds", facilityFilterIds.join(","))
+    if (debouncedSearch) params.set("search", debouncedSearch)
+    if (showAllInactive) params.set("includeInactive", "1")
+    const colKeys = columnKeysForExportQuery(companyId, activeViewType)
+    if (colKeys) params.set("columnKeys", colKeys)
+    const safe = `${activeViewType.replace(/[^a-zA-Z0-9]/g, "_")}_export.pdf`
+    const id = "export-pdf"
+    try {
+      toast.loading("Preparing PDF…", { id })
+      await downloadExportFile(
+        `/api/pending-tracking/export-pdf?${params}`,
+        safe
+      )
+      toast.success("Download started", { id })
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "PDF export failed", { id })
+    }
+  }, [companyId, activeViewType, facilityFilterIds, debouncedSearch, showAllInactive])
 
   return (
-    <MainAppShell onExport={handleExport}>
+    <MainAppShell onExport={handleExport} onExportPdf={handleExportPdf}>
       <div className="mb-10 flex flex-col items-end justify-between gap-6 md:flex-row">
         <div className="max-w-2xl">
           <span className="mb-2 block text-xs font-semibold uppercase tracking-widest text-on-surface-variant">
             Peak Healthcare
           </span>
           <h1 className="font-headline mb-2 text-4xl font-extrabold tracking-tight text-on-surface">
-            Medicaid Pending List Report
+            {activeReportTitle}
           </h1>
           <p className="text-lg text-on-surface-variant">
-            Detailed administrative view for case management and financial
-            tracking of pending applications.
+            Pending tracking by payer program (tab). Data is filtered on the
+            server using the selected program and your facility / search filters.
           </p>
         </div>
         <div className="flex gap-3">
@@ -162,9 +220,30 @@ export default function TrackingPage() {
         search={searchInput}
         onSearchChange={setSearchInput}
         facilities={facilities}
-        facilityFilter={facilityFilter}
-        onFacilityChange={setFacilityFilter}
+        selectedFacilityIds={facilityFilterIds}
+        onFacilitySelectionChange={setFacilityFilterIds}
       />
+
+      {!tabsLoading && activeViewType ? (
+        <div className="mb-4 flex flex-wrap items-center justify-end gap-3 rounded-2xl border border-slate-200/80 bg-white/60 px-4 py-3 shadow-sm">
+          <div className="flex flex-col gap-0.5">
+            <Label
+              htmlFor="show-all-inactive"
+              className="text-sm font-semibold text-slate-800"
+            >
+              Show all
+            </Label>
+            <span className="text-xs text-slate-500">
+              Include inactive records (IsActive = false)
+            </span>
+          </div>
+          <Switch
+            id="show-all-inactive"
+            checked={showAllInactive}
+            onCheckedChange={setShowAllInactive}
+          />
+        </div>
+      ) : null}
 
       {tabsError && (
         <div
@@ -178,12 +257,13 @@ export default function TrackingPage() {
 
       {!tabsLoading && activeViewType ? (
         <PendingTrackingGrid
-          key={`${companyId}-${facilityFilter || DEFAULT_FACILITY_ID}-${activeViewType}-${debouncedSearch}`}
+          key={`${companyId}-${facilityScopeKey}-${activeViewType}-${debouncedSearch}-${showAllInactive ? "all" : "active"}`}
           companyId={companyId}
-          facilityId={facilityFilter || DEFAULT_FACILITY_ID || undefined}
+          facilityIds={facilityFilterIds}
           state={DEFAULT_STATE || undefined}
           viewType={activeViewType}
           search={debouncedSearch}
+          includeInactive={showAllInactive}
         />
       ) : null}
     </MainAppShell>

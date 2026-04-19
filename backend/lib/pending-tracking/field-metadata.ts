@@ -31,7 +31,7 @@ export const SCREEN_DETAIL = "Detail"
 /** Field appears on both grid and detail drawer */
 export const SCREEN_BOTH = "Both"
 
-/** PendingTrackingItem primary key — not shown as a configurable grid/detail field */
+/** TrackingItemsTbl primary key — not shown as a configurable grid/detail field */
 export const TRACKING_ITEM_ID_FIELD_NAME = "TrackingItemId"
 
 /** Cached once per process – true if dbo.FieldMetadata has a ModalSectionId column. */

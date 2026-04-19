@@ -71,6 +71,26 @@ export function mapGridRowWithFieldMetadata(
     out.isHotCase = hotCase === true || hotCase === 1 || String(hotCase) === "1"
   }
 
+  const activeCol = valueByFieldName(row, "IsActive")
+  if (activeCol !== undefined) {
+    out.isActive =
+      activeCol === true ||
+      activeCol === 1 ||
+      String(activeCol).toLowerCase() === "true" ||
+      String(activeCol) === "1"
+  }
+
+  const stoppedAt = valueByFieldName(row, "StoppedAt")
+  if (stoppedAt !== undefined && stoppedAt !== null) {
+    out.stoppedAt =
+      stoppedAt instanceof Date ? stoppedAt.toISOString() : String(stoppedAt)
+  }
+
+  const stoppedBy = valueByFieldName(row, "StoppedBy")
+  if (stoppedBy !== undefined && stoppedBy !== null) {
+    out.stoppedBy = String(stoppedBy)
+  }
+
   applyCalculatedGridColumns(out, row, fields)
 
   return out

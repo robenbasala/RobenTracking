@@ -9,7 +9,7 @@ export async function fetchTrackingItemBase(
   request.input("trackingItemId", sql.Int, trackingItemId)
   const result = await request.query(`
     SELECT *
-    FROM dbo.PendingTrackingItem
+    FROM dbo.TrackingItemsTbl
     WHERE TrackingItemId = @trackingItemId
   `)
   const row = result.recordset[0] as Record<string, unknown> | undefined
