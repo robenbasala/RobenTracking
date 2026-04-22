@@ -40,6 +40,10 @@ import {
   apiPut,
   apiUrl,
 } from "@/services/api"
+import {
+  fetchCensusByResidentId,
+  type CensusBalanceRow,
+} from "@/services/census-powerbi"
 import { cn } from "@/lib/utils"
 import {
   Dialog,
@@ -195,8 +199,20 @@ function FieldDisplay({ f }: { f: UnifiedDetailFieldRow }) {
 
 // ─── SectionCard ─────────────────────────────────────────────────────────────
 
-function SectionCard({ section }: { section: ModalSectionMeta }) {
+function SectionCard({
+  section,
+  isEditing,
+  editValues,
+  onEditChange,
+}: {
+  section: ModalSectionMeta
+  isEditing?: boolean
+  editValues?: Record<string, unknown>
+  onEditChange?: (fieldName: string, value: unknown) => void
+}) {
   const isLOC = section.sectionType === "LOCTracking"
+  const inEdit = Boolean(isEditing && editValues && onEditChange)
+
   return (
     <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
       <h3 className="mb-5 text-[11px] font-bold uppercase tracking-widest text-slate-500">
@@ -210,11 +226,44 @@ function SectionCard({ section }: { section: ModalSectionMeta }) {
           {section.fields.map((f) => (
             <div key={f.fieldMetadataId} className="flex items-center gap-3 rounded-lg border border-slate-100 bg-slate-50/70 px-4 py-2.5">
               <span className="flex-1 text-[11px] font-semibold text-slate-600">{f.displayName}</span>
-              <span className="text-sm font-medium text-slate-800">
-                {f.dataType.toLowerCase() === "date"
-                  ? formatDateDisplay(f.value) || "—"
-                  : f.value != null && f.value !== "" ? String(f.value) : "—"}
-              </span>
+              {inEdit && f.isEditable ? (
+                <div className="min-w-[10rem] flex-1">
+                  <EditFieldView
+                    f={f}
+                    showLabel={false}
+                    value={
+                      editValues![f.fieldName] ??
+                      (f.dataType.toLowerCase() === "dropdown" ? f.dropdownOptionId : f.value)
+                    }
+                    onChange={(v) => onEditChange!(f.fieldName, v)}
+                  />
+                </div>
+              ) : (
+                <span className="text-sm font-medium text-slate-800">
+                  {f.dataType.toLowerCase() === "date"
+                    ? formatDateDisplay(f.value) || "—"
+                    : f.value != null && f.value !== "" ? String(f.value) : "—"}
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : inEdit ? (
+        <div className="grid grid-cols-2 gap-x-6 gap-y-5 md:grid-cols-3">
+          {section.fields.map((f) => (
+            <div key={f.fieldMetadataId}>
+              {f.isEditable ? (
+                <EditFieldView
+                  f={f}
+                  value={
+                    editValues![f.fieldName] ??
+                    (f.dataType.toLowerCase() === "dropdown" ? f.dropdownOptionId : f.value)
+                  }
+                  onChange={(v) => onEditChange!(f.fieldName, v)}
+                />
+              ) : (
+                <FieldDisplay f={f} />
+              )}
             </div>
           ))}
         </div>
@@ -231,7 +280,17 @@ function SectionCard({ section }: { section: ModalSectionMeta }) {
 
 // ─── EditFieldView ────────────────────────────────────────────────────────
 
-function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value: unknown; onChange: (v: unknown) => void }) {
+function EditFieldView({
+  f,
+  value,
+  onChange,
+  showLabel = true,
+}: {
+  f: UnifiedDetailFieldRow
+  value: unknown
+  onChange: (v: unknown) => void
+  showLabel?: boolean
+}) {
   const dt = f.dataType.toLowerCase()
   const lbl = "mb-1 block text-[10px] font-bold uppercase tracking-wider text-slate-400"
 
@@ -245,7 +304,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
           onChange={(e) => onChange(e.target.checked)}
           className="h-4 w-4 rounded border-slate-300 text-blue-600"
         />
-        <span className="text-sm text-slate-700">{f.displayName}</span>
+        {showLabel ? <span className="text-sm text-slate-700">{f.displayName}</span> : null}
       </label>
     )
   }
@@ -254,7 +313,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
     const s = toDateInputValue(value)
     return (
       <div>
-        <span className={lbl}>{f.displayName}</span>
+        {showLabel ? <span className={lbl}>{f.displayName}</span> : null}
         <input
           type="date"
           className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
@@ -268,7 +327,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
   if (dt === "dropdown") {
     return (
       <div>
-        <span className={lbl}>{f.displayName}</span>
+        {showLabel ? <span className={lbl}>{f.displayName}</span> : null}
         <select
           className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
           value={typeof value === "number" ? value : ""}
@@ -286,7 +345,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
   if (dt === "currency" || dt === "number") {
     return (
       <div>
-        <span className={lbl}>{f.displayName}</span>
+        {showLabel ? <span className={lbl}>{f.displayName}</span> : null}
         <input
           type="number"
           className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
@@ -301,7 +360,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
   if (dt === "textarea") {
     return (
       <div>
-        <span className={lbl}>{f.displayName}</span>
+        {showLabel ? <span className={lbl}>{f.displayName}</span> : null}
         <textarea
           className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
           value={value == null ? "" : String(value)}
@@ -315,7 +374,7 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
   // text, text area
   return (
     <div>
-      <span className={lbl}>{f.displayName}</span>
+      {showLabel ? <span className={lbl}>{f.displayName}</span> : null}
       <input
         type="text"
         className="w-full rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
@@ -330,64 +389,37 @@ function EditFieldView({ f, value, onChange }: { f: UnifiedDetailFieldRow; value
 
 function OverviewTab({ detail, isEditing, editValues, onEditChange }: { detail: PendingTrackingDetailResponse; isEditing?: boolean; editValues?: Record<string, unknown>; onEditChange?: (fieldName: string, value: unknown) => void }) {
   const sections = detail.sections ?? []
-  if (sections.length === 0 && detail.fields.length === 0) {
+  const sectionsToRender: ModalSectionMeta[] =
+    sections.length === 0 && detail.fields.length > 0
+      ? [
+          {
+            modalSectionId: null,
+            sectionName: "General",
+            sectionType: "Standard",
+            displayOrder: 0,
+            fields: detail.fields,
+          },
+        ]
+      : sections
+
+  if (sectionsToRender.length === 0 && detail.fields.length === 0) {
     return (
       <p className="mt-8 text-center text-sm text-slate-400">
         No detail fields configured. Add Detail or Both fields in Field Admin.
       </p>
     )
   }
-  if (sections.length === 0) {
-    // fallback: render flat fields as a single card
-    return (
-      <SectionCard
-        section={{
-          modalSectionId: null,
-          sectionName: "General",
-          sectionType: "Standard",
-          displayOrder: 0,
-          fields: detail.fields,
-        }}
-      />
-    )
-  }
-  if (isEditing && editValues && onEditChange) {
-    return (
-      <div className="flex flex-col gap-5">
-        {sections.map((section, i) => (
-          <div key={section.modalSectionId ?? `gen-${i}`} className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-            <h3 className="mb-5 text-[11px] font-bold uppercase tracking-widest text-slate-500">
-              {section.sectionName}
-            </h3>
-            {section.fields.length === 0 ? (
-              <p className="text-sm text-slate-400">No fields in this section.</p>
-            ) : (
-              <div className="space-y-4">
-                {section.fields.map((f) => (
-                  <div key={f.fieldMetadataId}>
-                    {f.isEditable ? (
-                      <EditFieldView
-                        f={f}
-                        value={editValues[f.fieldName] ?? (f.dataType.toLowerCase() === "dropdown" ? f.dropdownOptionId : f.value)}
-                        onChange={(v) => onEditChange(f.fieldName, v)}
-                      />
-                    ) : (
-                      <FieldDisplay f={f} />
-                    )}
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    )
-  }
 
   return (
     <div className="flex flex-col gap-5">
-      {sections.map((section, i) => (
-        <SectionCard key={section.modalSectionId ?? `gen-${i}`} section={section} />
+      {sectionsToRender.map((section, i) => (
+        <SectionCard
+          key={section.modalSectionId ?? `gen-${i}`}
+          section={section}
+          isEditing={isEditing}
+          editValues={editValues}
+          onEditChange={onEditChange}
+        />
       ))}
     </div>
   )
@@ -1704,85 +1736,126 @@ function CensusTab() {
 
 // ─── FinancialTab ────────────────────────────────────────────────────────────
 
-const DUMMY_AGING = {
-  current: 1250.0,
-  thirtyDay: 3400.0,
-  sixtyDay: 2100.0,
-  ninetyDay: 800.0,
-  overNinety: 5200.0,
+function formatPivotMoney(n: number | null): string {
+  if (n == null || !Number.isFinite(n)) return "—"
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD" })
 }
 
-const DUMMY_PAYMENTS = [
-  { date: "2025-03-15", description: "Medicaid Payment - March", amount: 4200.0, type: "payment" as const },
-  { date: "2025-03-01", description: "Room & Board - March", amount: -6500.0, type: "charge" as const },
-  { date: "2025-02-15", description: "Medicaid Payment - February", amount: 4200.0, type: "payment" as const },
-  { date: "2025-02-01", description: "Room & Board - February", amount: -6500.0, type: "charge" as const },
-  { date: "2025-01-20", description: "Medicare Co-Pay Adjustment", amount: 1500.0, type: "adjustment" as const },
-  { date: "2025-01-15", description: "Medicare Payment - January", amount: 8200.0, type: "payment" as const },
-  { date: "2025-01-01", description: "Room & Board - January", amount: -6500.0, type: "charge" as const },
-]
+function sortPivotRows(rows: CensusBalanceRow[]): CensusBalanceRow[] {
+  return [...rows].sort((a, b) => {
+    const ya = a.yearMonth ?? 0
+    const yb = b.yearMonth ?? 0
+    if (ya !== yb) return yb - ya
+    const da = a.month ?? ""
+    const db = b.month ?? ""
+    return db.localeCompare(da)
+  })
+}
 
-function FinancialTab() {
-  const total = DUMMY_AGING.current + DUMMY_AGING.thirtyDay + DUMMY_AGING.sixtyDay + DUMMY_AGING.ninetyDay + DUMMY_AGING.overNinety
+function FinancialTab({ residentId }: { residentId: string | null }) {
+  const [pivotRows, setPivotRows] = useState<CensusBalanceRow[]>([])
+  const [pivotLoading, setPivotLoading] = useState(false)
+  const [pivotError, setPivotError] = useState<string | null>(null)
 
-  const buckets = [
-    { label: "Current", amount: DUMMY_AGING.current, color: "text-emerald-700 bg-emerald-50 border-emerald-200" },
-    { label: "30 Days", amount: DUMMY_AGING.thirtyDay, color: "text-amber-700 bg-amber-50 border-amber-200" },
-    { label: "60 Days", amount: DUMMY_AGING.sixtyDay, color: "text-orange-700 bg-orange-50 border-orange-200" },
-    { label: "90 Days", amount: DUMMY_AGING.ninetyDay, color: "text-red-600 bg-red-50 border-red-200" },
-    { label: "90+ Days", amount: DUMMY_AGING.overNinety, color: "text-red-800 bg-red-100 border-red-300" },
-  ]
+  const loadPivot = useCallback(async () => {
+    if (!residentId?.trim()) {
+      setPivotRows([])
+      setPivotError(null)
+      setPivotLoading(false)
+      return
+    }
+    setPivotLoading(true)
+    setPivotError(null)
+    try {
+      const result = await fetchCensusByResidentId(residentId)
+      if (result.error) {
+        setPivotRows([])
+        setPivotError(result.error)
+        return
+      }
+      setPivotRows(sortPivotRows(result.rows))
+    } catch (e) {
+      setPivotRows([])
+      setPivotError(e instanceof Error ? e.message : "Failed to load Power BI data.")
+    } finally {
+      setPivotLoading(false)
+    }
+  }, [residentId])
+
+  useEffect(() => {
+    void loadPivot()
+  }, [loadPivot])
 
   return (
     <div className="flex flex-col gap-4">
-      <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
-        Financial data is currently using placeholder data. Live aging integration coming soon.
-      </div>
-
-      {/* Aging Buckets */}
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
-        {buckets.map((b) => (
-          <div key={b.label} className={cn("rounded-xl border p-4 text-center", b.color)}>
-            <p className="text-[10px] font-bold uppercase tracking-widest opacity-70">{b.label}</p>
-            <p className="mt-1 text-lg font-extrabold">
-              {b.amount.toLocaleString("en-US", { style: "currency", currency: "USD" })}
-            </p>
-          </div>
-        ))}
-        <div className="rounded-xl border border-slate-300 bg-slate-50 p-4 text-center">
-          <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">Total Balance</p>
-          <p className="mt-1 text-lg font-extrabold text-slate-900">
-            {total.toLocaleString("en-US", { style: "currency", currency: "USD" })}
-          </p>
-        </div>
-      </div>
-
-      {/* Payment History */}
       <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-        <h3 className="mb-4 text-[11px] font-bold uppercase tracking-widest text-slate-500">Payment History</h3>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm">
-            <thead>
-              <tr className="border-b border-slate-100">
-                <th className="pb-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">Date</th>
-                <th className="pb-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">Description</th>
-                <th className="pb-2 text-right text-[10px] font-bold uppercase tracking-widest text-slate-400">Amount</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {DUMMY_PAYMENTS.map((p, i) => (
-                <tr key={i}>
-                  <td className="py-2.5 text-slate-500">{formatDateDisplay(p.date)}</td>
-                  <td className="py-2.5 font-medium text-slate-700">{p.description}</td>
-                  <td className={cn("py-2.5 text-right font-semibold", p.amount >= 0 ? "text-emerald-600" : "text-red-600")}>
-                    {p.amount >= 0 ? "+" : ""}
-                    {p.amount.toLocaleString("en-US", { style: "currency", currency: "USD" })}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <h3 className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-slate-500">
+            <DollarSign className="h-4 w-4" />
+            Balance by month (Power BI)
+          </h3>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            onClick={() => void loadPivot()}
+            disabled={pivotLoading || !residentId?.trim()}
+          >
+            {pivotLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Refresh
+          </Button>
         </div>
+        {!residentId?.trim() ? (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+            No resident identifier on this row (expected ResidentID, PatientID, resstayID, or CID). Power BI cannot be queried.
+          </div>
+        ) : pivotError ? (
+          <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">{pivotError}</div>
+        ) : pivotLoading ? (
+          <div className="flex items-center gap-2 py-8 text-slate-400">
+            <Loader2 className="h-5 w-5 animate-spin" />
+            Loading financial pivot…
+          </div>
+        ) : pivotRows.length === 0 ? (
+          <p className="py-6 text-sm text-slate-400">No balance rows returned for this resident.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                  <th className="pb-2 pr-3">Month</th>
+                  <th className="pb-2 pr-3">YearMonth</th>
+                  <th className="pb-2 pr-3">Payer</th>
+                  <th className="pb-2 pr-3">Payer type</th>
+                  <th className="pb-2 pr-3 text-right">Balance</th>
+                  <th className="pb-2">Fac / Patient</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {pivotRows.map((r, i) => (
+                  <tr key={`${r.yearMonth ?? i}-${r.month ?? i}-${i}`} className="text-slate-700">
+                    <td className="py-2 pr-3 font-medium">{r.month ? formatDateDisplay(r.month) : "—"}</td>
+                    <td className="py-2 pr-3 font-mono text-xs">{r.yearMonth ?? "—"}</td>
+                    <td className="py-2 pr-3">{r.payerName ?? "—"}</td>
+                    <td className="py-2 pr-3">{r.payerType ?? "—"}</td>
+                    <td className="py-2 pr-3 text-right font-semibold">{formatPivotMoney(r.balance)}</td>
+                    <td className="py-2 text-[11px] text-slate-500">
+                      {r.facId ? <span className="mr-2">Fac: {r.facId}</span> : null}
+                      {r.patientId ? <span>Pat: {r.patientId}</span> : null}
+                      {!r.facId && !r.patientId ? "—" : null}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {residentId?.trim() ? (
+          <p className="mt-3 text-xs text-slate-500">
+            ResidentId: <span className="font-mono font-semibold text-slate-700">{residentId}</span>
+          </p>
+        ) : null}
       </div>
     </div>
   )
@@ -1850,9 +1923,18 @@ export function ResidentDetailModal({
     if (prevIdRef.current !== trackingItemId) {
       prevIdRef.current = trackingItemId
       setActiveTab("Overview")
+      setIsEditingFields(false)
+      setFieldEditValues({})
       void loadDetail(trackingItemId)
     }
   }, [open, trackingItemId, loadDetail])
+
+  useEffect(() => {
+    if (activeTab !== "Overview") {
+      setIsEditingFields(false)
+      setFieldEditValues({})
+    }
+  }, [activeTab])
 
   function handleOpenChange(nextOpen: boolean) {
     if (!nextOpen) {
@@ -1892,6 +1974,11 @@ export function ResidentDetailModal({
         if (field.isEditable) {
           values[field.fieldName] = field.dataType.toLowerCase() === "dropdown" ? field.dropdownOptionId : field.value
         }
+      }
+    }
+    for (const field of detail.fields) {
+      if (field.isEditable) {
+        values[field.fieldName] = field.dataType.toLowerCase() === "dropdown" ? field.dropdownOptionId : field.value
       }
     }
     setFieldEditValues(values)
@@ -1946,12 +2033,30 @@ export function ResidentDetailModal({
     firstFieldValue("resstayID") ??
     firstFieldValue("cid")
 
+  /** Power BI / financial pivot: prefer API header from TrackingItemsTbl; fallback to visible detail fields. */
+  const censusResidentId =
+    detail?.header?.residentId?.trim() ||
+    attachmentResidentId?.trim() ||
+    null
+
   const initials = (detail?.header?.residentName ?? "?")
     .split(/[\s,]+/)
     .filter(Boolean)
     .slice(0, 2)
     .map((w) => w[0]?.toUpperCase())
     .join("") || "?"
+
+  function detailHasAnyEditableField(d: PendingTrackingDetailResponse): boolean {
+    for (const section of d.sections ?? []) {
+      for (const f of section.fields) {
+        if (f.isEditable) return true
+      }
+    }
+    for (const f of d.fields) {
+      if (f.isEditable) return true
+    }
+    return false
+  }
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -2039,8 +2144,45 @@ export function ResidentDetailModal({
                     <Flame className="h-3.5 w-3.5" />
                     {detail.header?.isHotCase ? "Remove Hot Case" : "Mark Hot Case"}
                   </Button>
-               
-               
+                  {activeTab === "Overview" && detailHasAnyEditableField(detail) ? (
+                    !isEditingFields ? (
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        className="gap-1.5 rounded-lg px-4 text-sm font-semibold border-slate-300 text-slate-700 hover:bg-slate-50"
+                        onClick={startEditingFields}
+                      >
+                        <Edit className="h-3.5 w-3.5" />
+                        Edit fields
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="sm"
+                          className="rounded-lg px-4 text-sm font-semibold"
+                          onClick={cancelEditingFields}
+                          disabled={savingFields}
+                        >
+                          Cancel
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          className="gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white hover:bg-blue-700"
+                          onClick={() => void saveFields()}
+                          disabled={savingFields}
+                        >
+                          {savingFields ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : null}
+                          Save
+                        </Button>
+                      </>
+                    )
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -2079,7 +2221,7 @@ export function ResidentDetailModal({
                 />
               )}
               {activeTab === "Census" && <CensusTab />}
-              {activeTab === "Financial" && <FinancialTab />}
+              {activeTab === "Financial" && <FinancialTab residentId={censusResidentId} />}
               {activeTab === "Tasks" && (
                 <TasksTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
               )}
@@ -2091,7 +2233,7 @@ export function ResidentDetailModal({
                   trackingItemId={detail.trackingItemId}
                   companyId={detail.companyId}
                   uniqueId={attachmentUniqueId}
-                  residentId={attachmentResidentId}
+                  residentId={censusResidentId}
                 />
               )}
             </div>

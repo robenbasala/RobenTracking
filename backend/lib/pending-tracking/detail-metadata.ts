@@ -75,6 +75,27 @@ export function extractResidentHeader(
       ? String(residentNameRaw)
       : null
 
+  const residentIdRaw = firstNonEmpty(baseRow, [
+    "ResidentID",
+    "ResidentId",
+    "residentId",
+    "residentid",
+    "PatientID",
+    "PatientId",
+    "patientId",
+    "patientid",
+    "resstayID",
+    "resstayid",
+    "CID",
+    "cid",
+    "UniqueId",
+    "uniqueid",
+  ])
+  const residentId =
+    residentIdRaw !== null && residentIdRaw !== undefined
+      ? String(residentIdRaw).trim()
+      : null
+
   const payerRaw = firstNonEmpty(baseRow, ["ViewType", "viewType"])
   const payerLabel =
     payerRaw !== null && payerRaw !== undefined ? String(payerRaw) : null
@@ -113,6 +134,7 @@ export function extractResidentHeader(
 
   return {
     residentName,
+    residentId,
     payerLabel,
     dateOfBirthDisplay,
     ageYears,

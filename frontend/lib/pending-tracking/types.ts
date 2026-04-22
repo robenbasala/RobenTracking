@@ -56,6 +56,8 @@ export type ModalSectionMeta = {
 
 export type ResidentDetailHeader = {
   residentName: string | null
+  /** Primary resident / patient key for integrations (e.g. Power BI PatientID). */
+  residentId: string | null
   payerLabel: string | null
   dateOfBirthDisplay: string | null
   ageYears: number | null

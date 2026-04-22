@@ -47,6 +47,7 @@ import {
   generateReadSasUrl,
   uploadResidentAttachment,
 } from "./lib/blob-storage.js"
+import { executeCensusDaxForResident } from "./lib/census-powerbi.js"
 
 type NavSection =
   | "pending"
@@ -3034,5 +3035,42 @@ export async function deleteModalSection(req: Request, res: Response) {
     const message =
       error instanceof Error ? error.message : "Failed to delete section."
     res.status(500).json({ error: message })
+  }
+}
+
+const postPowerBiCensusSchema = z.object({
+  residentId: z.string().min(1).max(500),
+})
+
+/** Proxy: runs census DAX on Power BI dataset (secret server-side only). */
+export async function postPowerBiCensus(req: Request, res: Response) {
+  try {
+    const parsed = postPowerBiCensusSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "residentId is required.", rows: [] })
+      return
+    }
+    const secret = process.env.POWERBI_EXECUTE_DAX_SECRET?.trim()
+    if (!secret) {
+      res.status(503).json({
+        error:
+          "POWERBI_EXECUTE_DAX_SECRET is not set. Add it to backend or repo-root .env.local.",
+        rows: [],
+      })
+      return
+    }
+    const datasetId = process.env.POWERBI_DATASET_ID?.trim()
+    const executeUrl = process.env.POWERBI_EXECUTE_DAX_URL?.trim()
+    const { rows } = await executeCensusDaxForResident(parsed.data.residentId, {
+      secret,
+      datasetId: datasetId || undefined,
+      executeUrl: executeUrl || undefined,
+    })
+    res.json({ rows, empty: rows.length === 0 })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Census query failed."
+    console.error("postPowerBiCensus:", error)
+    res.status(502).json({ error: message, rows: [] })
   }
 }

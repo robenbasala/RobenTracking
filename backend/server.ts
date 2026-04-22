@@ -45,6 +45,11 @@ app.get("/api/hot-cases", h.getHotCases)
 app.get("/api/tasks", h.getTasks)
 
 // ---------------------------------------------------------------------------
+// Census (Power BI DAX proxy — secret stays on server)
+// ---------------------------------------------------------------------------
+app.post("/api/census/power-bi", h.postPowerBiCensus)
+
+// ---------------------------------------------------------------------------
 // Pending tracking — grid, filters, export
 // ---------------------------------------------------------------------------
 app.get("/api/pending-tracking/view-types", h.getViewTypes)
