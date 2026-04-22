@@ -5,6 +5,7 @@
 import cors from "cors"
 import dotenv from "dotenv"
 import express from "express"
+import multer from "multer"
 import path from "path"
 import { fileURLToPath } from "url"
 import * as h from "./route-handlers.js"
@@ -33,6 +34,8 @@ for (const { path: envPath, override } of envPaths) {
 const app = express()
 app.use(cors({ origin: true, credentials: true }))
 app.use(express.json({ limit: "10mb" }))
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } })
+const uploadSingleFile = upload.single("file") as unknown as express.RequestHandler
 
 // ---------------------------------------------------------------------------
 // Tracking lists & dashboard
@@ -103,6 +106,15 @@ app.get(
 app.post(
   "/api/pending-tracking/:trackingItemId/attachments",
   h.postAttachment
+)
+app.post(
+  "/api/pending-tracking/:trackingItemId/attachments/upload",
+  uploadSingleFile,
+  h.postAttachmentUpload
+)
+app.get(
+  "/api/pending-tracking/:trackingItemId/attachments/:attachmentId/download",
+  h.getAttachmentDownload
 )
 app.delete(
   "/api/pending-tracking/:trackingItemId/attachments/:attachmentId",

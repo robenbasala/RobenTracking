@@ -43,6 +43,10 @@ import { formatExportCellValue, formatShortDateValue } from "./lib/pending-track
 import { streamTrackingGridPdf } from "./lib/pending-tracking/stream-grid-pdf.js"
 import type { PendingTrackingGridResponse } from "./lib/pending-tracking/types.js"
 import { isValidViewTypeParam } from "./lib/pending-tracking/view-types.js"
+import {
+  generateReadSasUrl,
+  uploadResidentAttachment,
+} from "./lib/blob-storage.js"
 
 type NavSection =
   | "pending"
@@ -1530,7 +1534,7 @@ export async function getAttachments(req: Request, res: Response) {
     r.input("companyId", sql.Int, companyId)
     const result = await r.query(`
       SELECT AttachmentId, FileName, ContentType, FileSizeBytes, BlobUrl,
-             UploadedAt, UploadedBy, Description
+             BlobContainer, BlobName, UniqueId, ResidentId, UploadedAt, UploadedBy, Description
       FROM dbo.ResidentAttachment
       WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND IsDeleted = 0
       ORDER BY UploadedAt DESC
@@ -1541,6 +1545,10 @@ export async function getAttachments(req: Request, res: Response) {
       contentType: row.ContentType,
       fileSizeBytes: row.FileSizeBytes,
       blobUrl: row.BlobUrl,
+      blobContainer: row.BlobContainer,
+      blobName: row.BlobName,
+      uniqueId: row.UniqueId,
+      residentId: row.ResidentId,
       uploadedAt: (row.UploadedAt instanceof Date
         ? row.UploadedAt
         : new Date(row.UploadedAt as string)
@@ -1564,8 +1572,54 @@ const postAttachmentSchema = z.object({
   blobUrl: z.string().min(1),
   blobContainer: z.string().min(1),
   blobName: z.string().min(1),
+  uniqueId: z.string().nullable().optional(),
+  residentId: z.string().nullable().optional(),
   description: z.string().nullable().optional(),
 })
+
+function firstNonEmptyString(
+  value: unknown,
+  maxLen = 200
+): string | null {
+  if (typeof value !== "string") return null
+  const v = value.trim()
+  if (!v) return null
+  return v.slice(0, maxLen)
+}
+
+async function resolveAttachmentIds(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  trackingItemId: number,
+  explicitUniqueId: unknown,
+  explicitResidentId: unknown
+): Promise<{ uniqueId: string | null; residentId: string | null }> {
+  const bodyUniqueId = firstNonEmptyString(explicitUniqueId, 200)
+  const bodyResidentId = firstNonEmptyString(explicitResidentId, 200)
+  if (bodyUniqueId || bodyResidentId) {
+    return { uniqueId: bodyUniqueId, residentId: bodyResidentId }
+  }
+
+  const r = pool.request()
+  r.input("trackingItemId", sql.Int, trackingItemId)
+  const result = await r.query<Record<string, unknown>>(`
+    SELECT TOP 1 *
+    FROM dbo.TrackingItemsTbl
+    WHERE TrackingItemId = @trackingItemId
+  `)
+  const row = result.recordset[0] ?? {}
+  const keyMap = new Map<string, unknown>()
+  for (const [k, v] of Object.entries(row)) keyMap.set(k.toLowerCase(), v)
+
+  const uniqueId =
+    firstNonEmptyString(keyMap.get("uniqueid"), 200) ??
+    firstNonEmptyString(keyMap.get("unique_id"), 200)
+  const residentId =
+    firstNonEmptyString(keyMap.get("residentid"), 200) ??
+    firstNonEmptyString(keyMap.get("resstayid"), 200) ??
+    firstNonEmptyString(keyMap.get("cid"), 200)
+
+  return { uniqueId: bodyUniqueId ?? uniqueId, residentId: bodyResidentId ?? residentId }
+}
 
 export async function postAttachment(req: Request, res: Response) {
   try {
@@ -1582,6 +1636,12 @@ export async function postAttachment(req: Request, res: Response) {
       return
     }
     const pool = await getTrackingPool()
+    const resolvedIds = await resolveAttachmentIds(
+      pool,
+      trackingItemId,
+      parsed.data.uniqueId,
+      parsed.data.residentId
+    )
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, parsed.data.companyId)
@@ -1591,22 +1651,148 @@ export async function postAttachment(req: Request, res: Response) {
     r.input("blobUrl", sql.NVarChar(2000), parsed.data.blobUrl.trim())
     r.input("blobContainer", sql.NVarChar(256), parsed.data.blobContainer.trim())
     r.input("blobName", sql.NVarChar(1000), parsed.data.blobName.trim())
+    r.input("uniqueId", sql.NVarChar(200), resolvedIds.uniqueId)
+    r.input("residentId", sql.NVarChar(200), resolvedIds.residentId)
     r.input("uploadedBy", sql.NVarChar(256), "system")
     r.input("description", sql.NVarChar(1000), parsed.data.description ?? null)
     const result = await r.query<{ AttachmentId: number }>(`
       INSERT INTO dbo.ResidentAttachment
         (TrackingItemId, CompanyId, FileName, ContentType, FileSizeBytes,
-         BlobUrl, BlobContainer, BlobName, UploadedBy, Description)
+         BlobUrl, BlobContainer, BlobName, UniqueId, ResidentId, UploadedBy, Description)
       OUTPUT INSERTED.AttachmentId
       VALUES
         (@trackingItemId, @companyId, @fileName, @contentType, @fileSizeBytes,
-         @blobUrl, @blobContainer, @blobName, @uploadedBy, @description)
+         @blobUrl, @blobContainer, @blobName, @uniqueId, @residentId, @uploadedBy, @description)
     `)
     const attachmentId = Number(result.recordset[0]?.AttachmentId)
     res.json({ ok: true, attachmentId })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to log attachment."
+    res.status(500).json({ error: message })
+  }
+}
+
+export async function postAttachmentUpload(req: Request, res: Response) {
+  try {
+    const trackingItemId = Number(req.params.trackingItemId)
+    if (!Number.isFinite(trackingItemId)) {
+      res.status(400).json({ error: "Invalid trackingItemId" })
+      return
+    }
+    const companyId = Number(req.body?.companyId)
+    if (!Number.isFinite(companyId)) {
+      res.status(400).json({ error: "Invalid companyId" })
+      return
+    }
+    const file = (req as Request & { file?: Express.Multer.File }).file
+    if (!file?.buffer || !file.originalname) {
+      res.status(400).json({ error: "file is required" })
+      return
+    }
+    const descriptionRaw = req.body?.description
+    const uniqueIdRaw = req.body?.uniqueId
+    const residentIdRaw = req.body?.residentId
+    const description =
+      typeof descriptionRaw === "string" && descriptionRaw.trim().length > 0
+        ? descriptionRaw.trim().slice(0, 1000)
+        : null
+    const uploadedByRaw = req.body?.uploadedBy
+    const uploadedBy =
+      typeof uploadedByRaw === "string" && uploadedByRaw.trim().length > 0
+        ? uploadedByRaw.trim().slice(0, 256)
+        : "system"
+
+    const upload = await uploadResidentAttachment({
+      trackingItemId,
+      companyId,
+      originalFileName: file.originalname,
+      contentType: file.mimetype || "application/octet-stream",
+      bytes: file.buffer,
+    })
+
+    const pool = await getTrackingPool()
+    const resolvedIds = await resolveAttachmentIds(
+      pool,
+      trackingItemId,
+      uniqueIdRaw,
+      residentIdRaw
+    )
+    const r = pool.request()
+    r.input("trackingItemId", sql.Int, trackingItemId)
+    r.input("companyId", sql.Int, companyId)
+    r.input("fileName", sql.NVarChar(500), file.originalname.trim().slice(0, 500))
+    r.input("contentType", sql.NVarChar(200), (file.mimetype || "application/octet-stream").slice(0, 200))
+    r.input("fileSizeBytes", sql.BigInt, file.size)
+    r.input("blobUrl", sql.NVarChar(2000), upload.blobUrl)
+    r.input("blobContainer", sql.NVarChar(256), upload.blobContainer)
+    r.input("blobName", sql.NVarChar(1000), upload.blobName)
+    r.input("uniqueId", sql.NVarChar(200), resolvedIds.uniqueId)
+    r.input("residentId", sql.NVarChar(200), resolvedIds.residentId)
+    r.input("uploadedBy", sql.NVarChar(256), uploadedBy)
+    r.input("description", sql.NVarChar(1000), description)
+    const result = await r.query<{ AttachmentId: number }>(`
+      INSERT INTO dbo.ResidentAttachment
+        (TrackingItemId, CompanyId, FileName, ContentType, FileSizeBytes,
+         BlobUrl, BlobContainer, BlobName, UniqueId, ResidentId, UploadedBy, Description)
+      OUTPUT INSERTED.AttachmentId
+      VALUES
+        (@trackingItemId, @companyId, @fileName, @contentType, @fileSizeBytes,
+         @blobUrl, @blobContainer, @blobName, @uniqueId, @residentId, @uploadedBy, @description)
+    `)
+    const attachmentId = Number(result.recordset[0]?.AttachmentId)
+    res.json({ ok: true, attachmentId })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to upload attachment."
+    res.status(500).json({ error: message })
+  }
+}
+
+export async function getAttachmentDownload(req: Request, res: Response) {
+  try {
+    const trackingItemId = Number(req.params.trackingItemId)
+    const attachmentId = Number(req.params.attachmentId)
+    const companyId = numParam(
+      req.query as Record<string, unknown>,
+      "companyId",
+      "TRACKING_DEFAULT_COMPANY_ID"
+    )
+    if (
+      !Number.isFinite(trackingItemId) ||
+      !Number.isFinite(attachmentId) ||
+      companyId === null
+    ) {
+      res.status(400).json({ error: "Invalid params" })
+      return
+    }
+    const pool = await getTrackingPool()
+    const r = pool.request()
+    r.input("attachmentId", sql.Int, attachmentId)
+    r.input("trackingItemId", sql.Int, trackingItemId)
+    r.input("companyId", sql.Int, companyId)
+    const result = await r.query<{
+      BlobContainer: string
+      BlobName: string
+      FileName: string
+    }>(`
+      SELECT BlobContainer, BlobName, FileName
+      FROM dbo.ResidentAttachment
+      WHERE AttachmentId = @attachmentId
+        AND TrackingItemId = @trackingItemId
+        AND CompanyId = @companyId
+        AND IsDeleted = 0
+    `)
+    const row = result.recordset[0]
+    if (!row) {
+      res.status(404).json({ error: "Attachment not found." })
+      return
+    }
+    const sasUrl = generateReadSasUrl(row.BlobContainer, row.BlobName)
+    res.redirect(sasUrl)
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to download attachment."
     res.status(500).json({ error: message })
   }
 }

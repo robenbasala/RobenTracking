@@ -24,6 +24,9 @@ Put **`TRACKING_DB_CONNECTION_STRING` here** — not only inside `frontend/.env.
 | Variable | Purpose |
 |----------|---------|
 | `TRACKING_DB_CONNECTION_STRING` | SQL Server connection string (required) |
+| `AZURE_STORAGE_ACCOUNT` | Azure Blob storage account name (required for attachments upload/download) |
+| `AZURE_STORAGE_KEY` | Azure Blob storage account key (required for attachments upload/download) |
+| `AZURE_STORAGE_CONTAINER` | Azure Blob container name (required for attachments upload/download) |
 | `TRACKING_DEFAULT_COMPANY_ID` | Default company id when query omits `companyId` |
 | `TRACKING_GRID_USE_REPORT_ITEM_IDS_PROC` | When `1` (default), pending-tracking **grid** loads eligible `TrackingItemId` rows via **`dbo.trk_PendingTracking_ReportSelectItemIds`** (`INSERT…EXEC`) then aggregates `FieldMetadata` in SQL. Set to `0` to use a direct `JOIN` to **`fn_PendingTracking_ReportEligibleItems`** instead (same filter, no proc). Requires **`sql/012`** on the database. |
 | `PORT` | API port (default **3001**) |
@@ -70,6 +73,7 @@ Run these on your tracking database **in order**:
 
 1. **`sql/010-pending-tracking-report-filter.sql`** — **`dbo.fn_PendingTracking_MatchesReport`** (tab → payer rules: Income, Managed Care, Medicaid Pending, Medicare, Private, Recerts, Other, plus legacy `ViewType` match).
 2. **`sql/012-pending-tracking-report-eligible-items.sql`** — **`dbo.fn_PendingTracking_ReportEligibleItems`** (full row filter: company, facility CSV, status, search, active flag + report rules) and **`dbo.trk_PendingTracking_ReportSelect`**.
+3. **`sql/014-resident-attachment-identifiers.sql`** — adds `UniqueId` and `ResidentId` columns on `dbo.ResidentAttachment` to store resident-level identifiers with each attachment.
 
 The grid and Excel export **JOIN** the TVF from **012** when it exists (same filter as the SP). If the TVF is missing, the API falls back to an inline `WHERE` using **`fn_PendingTracking_MatchesReport`** plus facility/status/search so the UI still works. Detection of the TVF / `ReportSelectItemIds` proc is **not cached**, so after you run **012** the next request picks them up without restarting the API.
 

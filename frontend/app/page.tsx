@@ -199,16 +199,7 @@ export default function TrackingPage() {
           </p>
         </div>
         <div className="flex gap-3">
-          <button
-            type="button"
-            className="flex items-center gap-2 rounded-full bg-primary px-6 py-3 text-on-primary shadow-lg transition-all hover:scale-[1.02] hover:shadow-primary/20 active:scale-[0.98]"
-            onClick={() =>
-              window.alert("Add Resident — connect create flow when ready.")
-            }
-          >
-            <UserPlus className="h-5 w-5" />
-            <span className="font-bold tracking-tight">Add Resident</span>
-          </button>
+      
         </div>
       </div>
 
@@ -234,7 +225,7 @@ export default function TrackingPage() {
               Show all
             </Label>
             <span className="text-xs text-slate-500">
-              Include inactive records (IsActive = false)
+              Include inactive records 
             </span>
           </div>
           <Switch

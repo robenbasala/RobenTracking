@@ -466,10 +466,19 @@ export function PendingTrackingGrid({
           <table className="w-full border-collapse text-left">
             <thead>
               <tr className="border-b border-slate-100 bg-slate-50">
+                <th className="w-10 px-2 py-3.5 text-center text-xs text-slate-400">
+                  {" "}
+                </th>
                 {displayColumns.map((col) => (
                   <th
                     key={col.key}
-                    className="cursor-pointer select-none px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-blue-600"
+                    className={cn(
+                      "cursor-pointer select-none px-4 py-3.5 text-left text-xs font-semibold uppercase tracking-wider text-slate-500 hover:text-blue-600",
+                      (col.key ?? "").toLowerCase() === "residentname" ||
+                        (col.title ?? "").toLowerCase() === "resident name"
+                        ? "min-w-[12rem]"
+                        : ""
+                    )}
                     onClick={() => handleSort(col.key)}
                   >
                     {col.title}
@@ -484,7 +493,7 @@ export function PendingTrackingGrid({
             <tbody className="divide-y divide-slate-100">
               {loading && (
                 <tr>
-                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 1}>
+                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 2}>
                     <span className="inline-flex items-center gap-2">
                       <Loader2 className="h-4 w-4 animate-spin" />
                       Loading…
@@ -494,7 +503,7 @@ export function PendingTrackingGrid({
               )}
               {!loading && error && (
                 <tr>
-                  <td className="px-6 py-8 text-red-500" colSpan={displayColumns.length + 1}>{error}</td>
+                  <td className="px-6 py-8 text-red-500" colSpan={displayColumns.length + 2}>{error}</td>
                 </tr>
               )}
               {!loading && !error && rows.map((row, rowIndex) => {
@@ -518,13 +527,31 @@ export function PendingTrackingGrid({
                           : "hover:bg-slate-50/70"
                     )}
                   >
-                    {displayColumns.map((col, colIdx) => {
+                    <td className="px-2 py-2.5 text-center align-middle">
+                      {isHotCase ? (
+                        <span title="Hot Case">
+                          <Flame className="mx-auto h-3.5 w-3.5 text-orange-500" />
+                        </span>
+                      ) : (
+                        <span className="text-slate-300">-</span>
+                      )}
+                    </td>
+                    {displayColumns.map((col) => {
                       const isCellEditing = editingCell?.rowId === id && editingCell?.colKey === col.key
                       const isCellSaving = savingCell?.rowId === id && savingCell?.colKey === col.key
                       const isDetailLink = detailLinkColumnKey != null && col.key === detailLinkColumnKey
 
                       return (
-                        <td key={col.key} className="px-4 py-2.5 align-middle">
+                        <td
+                          key={col.key}
+                          className={cn(
+                            "px-4 py-2.5 align-middle",
+                            (col.key ?? "").toLowerCase() === "residentname" ||
+                              (col.title ?? "").toLowerCase() === "resident name"
+                              ? "min-w-[12rem]"
+                              : ""
+                          )}
+                        >
                           {isCellSaving ? (
                             <span className="inline-flex items-center gap-1.5">
                               {renderDisplayCell(col, row)}
@@ -549,9 +576,6 @@ export function PendingTrackingGrid({
                               disabled={id == null}
                               onClick={() => id != null && openModal(id)}
                             >
-                              {isHotCase && colIdx === 0 && (
-                                <Flame className="mr-1 inline h-3.5 w-3.5 text-orange-500" />
-                              )}
                               {formatCellForColumn(getRowValueForKey(row, col.key), col.type)}
                             </button>
                           ) : col.isEditable ? (
@@ -569,18 +593,12 @@ export function PendingTrackingGrid({
                                 }
                               }}
                             >
-                              {isHotCase && colIdx === 0 && (
-                                <Flame className="mr-1 inline h-3.5 w-3.5 text-orange-500" />
-                              )}
                               {renderDisplayCell(col, row)}
                               <Pencil className="absolute right-1 top-1/2 -translate-y-1/2 h-3 w-3
                                               text-blue-300 opacity-0 group-hover/cell:opacity-100 transition-opacity" />
                             </div>
                           ) : (
                             <span>
-                              {isHotCase && colIdx === 0 && !detailLinkColumnKey && (
-                                <Flame className="mr-1 inline h-3.5 w-3.5 text-orange-500" />
-                              )}
                               {renderDisplayCell(col, row)}
                             </span>
                           )}
@@ -656,7 +674,7 @@ export function PendingTrackingGrid({
               })}
               {!loading && !error && rows.length === 0 && (
                 <tr>
-                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 1}>
+                  <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 2}>
                     No records match your filters.
                   </td>
                 </tr>
@@ -706,6 +724,14 @@ export function PendingTrackingGrid({
         companyId={companyId}
         state={state}
         open={modalOpen}
+        onHotCaseChanged={(trackingItemId, isHotCase) => {
+          setRows((prev) =>
+            prev.map((r) => {
+              if (getTrackingItemIdFromRow(r) !== trackingItemId) return r
+              return { ...r, IsHotCase: isHotCase, isHotCase }
+            })
+          )
+        }}
         onClose={() => {
           setModalOpen(false)
           setSelectedTrackingItemId(null)

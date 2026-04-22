@@ -18,7 +18,6 @@ import {
   LogIn,
   Highlighter,
   LogOut,
-  Mail,
   Paperclip,
   Pin,
   Plus,
@@ -27,6 +26,11 @@ import {
   Trash2,
   Upload,
   X,
+  FileImage,
+  FileArchive,
+  FileSpreadsheet,
+  FileCode2,
+  File,
 } from "lucide-react"
 import {
   apiDelete,
@@ -34,6 +38,7 @@ import {
   apiPatch,
   apiPost,
   apiPut,
+  apiUrl,
 } from "@/services/api"
 import { cn } from "@/lib/utils"
 import {
@@ -74,6 +79,43 @@ function formatFileSize(bytes: number | null): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function attachmentIconFor(fileName: string, contentType?: string | null) {
+  const lower = fileName.toLowerCase()
+  const mime = (contentType ?? "").toLowerCase()
+  if (mime.startsWith("image/") || /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(lower)) return FileImage
+  if (
+    mime.includes("pdf") ||
+    lower.endsWith(".pdf") ||
+    mime.includes("msword") ||
+    mime.includes("officedocument.wordprocessingml")
+  ) return FileText
+  if (
+    mime.includes("sheet") ||
+    mime.includes("excel") ||
+    /\.(xls|xlsx|csv)$/i.test(lower)
+  ) return FileSpreadsheet
+  if (
+    mime.includes("zip") ||
+    mime.includes("rar") ||
+    mime.includes("7z") ||
+    /\.(zip|rar|7z|tar|gz)$/i.test(lower)
+  ) return FileArchive
+  if (
+    mime.includes("json") ||
+    mime.includes("javascript") ||
+    mime.includes("typescript") ||
+    /\.(json|js|ts|tsx|jsx|sql|xml|html|css)$/i.test(lower)
+  ) return FileCode2
+  return File
+}
+
+function isImageAttachment(fileName: string, contentType?: string | null) {
+  const lower = fileName.toLowerCase()
+  const mime = (contentType ?? "").toLowerCase()
+  if (mime.startsWith("image/")) return true
+  return /\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(lower)
 }
 
 // ─── FieldDisplay ────────────────────────────────────────────────────────────
@@ -1275,16 +1317,24 @@ function EmailsTab({
 function AttachmentsTab({
   trackingItemId,
   companyId,
+  uniqueId,
+  residentId,
 }: {
   trackingItemId: number
   companyId: number
+  uniqueId?: string | null
+  residentId?: string | null
 }) {
+  const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
   const [attachments, setAttachments] = useState<ResidentAttachment[]>([])
   const [loading, setLoading] = useState(true)
   const [showUpload, setShowUpload] = useState(false)
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [description, setDescription] = useState("")
   const [uploading, setUploading] = useState(false)
+  const [deletingAttachmentId, setDeletingAttachmentId] = useState<number | null>(null)
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null)
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<number | null>(null)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -1305,10 +1355,16 @@ function AttachmentsTab({
   useEffect(() => { void load() }, [load])
 
   async function deleteAttachment(attachmentId: number) {
-    await apiDelete(
-      `/api/pending-tracking/${trackingItemId}/attachments/${attachmentId}?companyId=${companyId}`
-    )
-    await load()
+    setDeletingAttachmentId(attachmentId)
+    try {
+      await apiDelete(
+        `/api/pending-tracking/${trackingItemId}/attachments/${attachmentId}?companyId=${companyId}`
+      )
+      await load()
+      setDeleteConfirmId(null)
+    } finally {
+      setDeletingAttachmentId(null)
+    }
   }
 
   function cancelUpload() {
@@ -1321,39 +1377,35 @@ function AttachmentsTab({
 
   async function handleUpload() {
     if (!selectedFile) return
+    if (selectedFile.size > MAX_ATTACHMENT_BYTES) {
+      setUploadError("File is too large. Maximum allowed size is 25MB.")
+      return
+    }
     setUploading(true)
     setUploadError(null)
     try {
-      // ── TODO: Upload to Azure Blob via your API, then log metadata ────────
-      //
-      // Step 1: Upload file to Azure Blob using your API:
-      //   const formData = new FormData()
-      //   formData.append("file", selectedFile)
-      //   const uploadRes = await fetch("https://your-api/upload-blob", {
-      //     method: "POST",
-      //     body: formData,
-      //   })
-      //   const { blobUrl, blobContainer, blobName } = await uploadRes.json()
-      //
-      // Step 2: Log the metadata to our DB:
-      //   await fetch(`/api/pending-tracking/${trackingItemId}/attachments`, {
-      //     method: "POST",
-      //     headers: { "Content-Type": "application/json" },
-      //     body: JSON.stringify({
-      //       companyId,
-      //       fileName: selectedFile.name,
-      //       contentType: selectedFile.type || "application/octet-stream",
-      //       fileSizeBytes: selectedFile.size,
-      //       blobUrl,
-      //       blobContainer,
-      //       blobName,
-      //       description: description.trim() || null,
-      //     }),
-      //   })
-      //
-      // Step 3: await load() to refresh the list
-      // ─────────────────────────────────────────────────────────────────────
-      throw new Error("Azure Blob upload API not yet connected. See TODO comments in AttachmentsTab.handleUpload().")
+      const formData = new FormData()
+      formData.append("file", selectedFile)
+      formData.append("companyId", String(companyId))
+      if (uniqueId?.trim()) formData.append("uniqueId", uniqueId.trim())
+      if (residentId?.trim()) formData.append("residentId", residentId.trim())
+      if (description.trim()) formData.append("description", description.trim())
+      if (process.env.NEXT_PUBLIC_ACTING_USER?.trim()) {
+        formData.append("uploadedBy", process.env.NEXT_PUBLIC_ACTING_USER.trim())
+      }
+      const uploadRes = await fetch(
+        apiUrl(`/api/pending-tracking/${trackingItemId}/attachments/upload`),
+        { method: "POST", body: formData }
+      )
+      if (!uploadRes.ok) {
+        const errText = await uploadRes.text()
+        if (uploadRes.status === 413 || /file too large|limit file size/i.test(errText)) {
+          throw new Error("File is too large. Maximum allowed size is 25MB.")
+        }
+        throw new Error(errText || "Upload failed.")
+      }
+      await load()
+      cancelUpload()
     } catch (e) {
       setUploadError(e instanceof Error ? e.message : "Upload failed.")
     } finally {
@@ -1399,6 +1451,12 @@ function AttachmentsTab({
                 className="hidden"
                 onChange={(e) => {
                   const f = e.target.files?.[0] ?? null
+                  if (f && f.size > MAX_ATTACHMENT_BYTES) {
+                    setSelectedFile(null)
+                    setUploadError("File is too large. Maximum allowed size is 25MB.")
+                    if (fileInputRef.current) fileInputRef.current.value = ""
+                    return
+                  }
                   setSelectedFile(f)
                   setUploadError(null)
                 }}
@@ -1419,9 +1477,7 @@ function AttachmentsTab({
             {uploadError && <p className="text-sm text-red-500">{uploadError}</p>}
 
             <div className="flex items-center justify-between">
-              <p className="text-[11px] text-amber-600">
-                Connect your Azure Blob API in AttachmentsTab.handleUpload() to enable uploads.
-              </p>
+              <p className="text-[11px] text-slate-500">Max upload size: 25MB</p>
               <div className="flex gap-2">
                 <Button size="sm" variant="ghost" onClick={cancelUpload}>Cancel</Button>
                 <Button
@@ -1453,8 +1509,12 @@ function AttachmentsTab({
         ) : (
           <div className="divide-y divide-slate-100">
             {attachments.map((a) => (
-              <div key={a.attachmentId} className="flex items-center gap-3 py-3">
-                <Paperclip className="h-5 w-5 shrink-0 text-slate-400" />
+              <div key={a.attachmentId} className="py-3">
+                <div className="flex items-center gap-3">
+                {(() => {
+                  const Icon = attachmentIconFor(a.fileName, a.contentType)
+                  return <Icon className="h-5 w-5 shrink-0 text-slate-400" />
+                })()}
                 <div className="flex-1 min-w-0">
                   <p className="truncate text-sm font-semibold text-slate-800">{a.fileName}</p>
                   <p className="text-[11px] text-slate-400">
@@ -1467,7 +1527,9 @@ function AttachmentsTab({
                   {a.description && <p className="text-[11px] text-slate-500">{a.description}</p>}
                 </div>
                 <a
-                  href={a.blobUrl}
+                  href={apiUrl(
+                    `/api/pending-tracking/${trackingItemId}/attachments/${a.attachmentId}/download?companyId=${companyId}`
+                  )}
                   target="_blank"
                   rel="noreferrer"
                   className="shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-semibold text-blue-600 hover:bg-blue-50"
@@ -1476,12 +1538,99 @@ function AttachmentsTab({
                 </a>
                 <button
                   type="button"
+                  className="shrink-0 rounded-lg px-3 py-1.5 text-[11px] font-semibold text-emerald-700 hover:bg-emerald-50"
+                  onClick={() =>
+                    setPreviewAttachmentId((prev) =>
+                      prev === a.attachmentId ? null : a.attachmentId
+                    )
+                  }
+                >
+                  {previewAttachmentId === a.attachmentId ? "Hide" : "Preview"}
+                </button>
+                <button
+                  type="button"
                   title="Delete attachment"
-                  onClick={() => deleteAttachment(a.attachmentId)}
+                  disabled={deletingAttachmentId === a.attachmentId}
+                  onClick={() => setDeleteConfirmId(a.attachmentId)}
                   className="shrink-0 rounded p-1 text-slate-300 hover:bg-red-50 hover:text-red-400"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
+                  {deletingAttachmentId === a.attachmentId ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-3.5 w-3.5" />
+                  )}
                 </button>
+              </div>
+                {previewAttachmentId === a.attachmentId && (
+                  <div className="mt-3 overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
+                    {isImageAttachment(a.fileName, a.contentType) ? (
+                      <img
+                        src={apiUrl(
+                          `/api/pending-tracking/${trackingItemId}/attachments/${a.attachmentId}/download?companyId=${companyId}`
+                        )}
+                        alt={a.fileName}
+                        className="max-h-[480px] w-full object-contain bg-white"
+                        loading="lazy"
+                      />
+                    ) : (
+                      <div>
+                        <iframe
+                          src={apiUrl(
+                            `/api/pending-tracking/${trackingItemId}/attachments/${a.attachmentId}/download?companyId=${companyId}`
+                          )}
+                          title={`Preview ${a.fileName}`}
+                          className="h-[520px] w-full bg-white"
+                        />
+                        <div className="flex items-center justify-between border-t border-slate-200 bg-white px-3 py-2 text-[11px] text-slate-500">
+                          <span>
+                            If this file type is not embeddable in your browser, use Open/Download.
+                          </span>
+                          <a
+                            href={apiUrl(
+                              `/api/pending-tracking/${trackingItemId}/attachments/${a.attachmentId}/download?companyId=${companyId}`
+                            )}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="rounded px-2 py-1 font-semibold text-blue-600 hover:bg-blue-50"
+                          >
+                            Open in new tab
+                          </a>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+                {deleteConfirmId === a.attachmentId && (
+                  <div className="mt-3 rounded-xl border border-red-200 bg-red-50/60 p-3">
+                    <p className="text-sm font-medium text-red-700">
+                      Delete this attachment? This cannot be undone.
+                    </p>
+                   
+                    <div className="mt-3 flex justify-end gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={deletingAttachmentId === a.attachmentId}
+                        onClick={() => setDeleteConfirmId(null)}
+                      >
+                        Cancel
+                      </Button>
+                      <Button
+                        size="sm"
+                        className="bg-red-600 text-white hover:bg-red-700"
+                        disabled={deletingAttachmentId === a.attachmentId}
+                        onClick={() => void deleteAttachment(a.attachmentId)}
+                      >
+                        {deletingAttachmentId === a.attachmentId ? (
+                          <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+                        )}
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
           </div>
@@ -1641,15 +1790,14 @@ function FinancialTab() {
 
 // ─── ResidentDetailModal ──────────────────────────────────────────────────────
 
-type Tab = "Overview" | "Census" | "Financial" | "Tasks" | "Notes" | "Emails" | "Attachments"
-const TABS: Tab[] = ["Overview", "Census", "Financial", "Tasks", "Notes", "Emails", "Attachments"]
+type Tab = "Overview" | "Census" | "Financial" | "Tasks" | "Notes" | "Attachments"
+const TABS: Tab[] = ["Overview", "Census", "Financial", "Tasks", "Notes", "Attachments"]
 const TAB_ICONS: Record<Tab, React.ElementType> = {
   Overview: LayoutGrid,
   Census: History,
   Financial: DollarSign,
   Tasks: CheckSquare2,
   Notes: FileText,
-  Emails: Mail,
   Attachments: Paperclip,
 }
 
@@ -1658,10 +1806,18 @@ type Props = {
   companyId: number
   state?: string | null
   open: boolean
+  onHotCaseChanged?: (trackingItemId: number, isHotCase: boolean) => void
   onClose: () => void
 }
 
-export function ResidentDetailModal({ trackingItemId, companyId, state, open, onClose }: Props) {
+export function ResidentDetailModal({
+  trackingItemId,
+  companyId,
+  state,
+  open,
+  onHotCaseChanged,
+  onClose,
+}: Props) {
   const [detail, setDetail] = useState<PendingTrackingDetailResponse | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
   const [detailError, setDetailError] = useState<string | null>(null)
@@ -1720,6 +1876,7 @@ export function ResidentDetailModal({ trackingItemId, companyId, state, open, on
           ? { ...prev, header: { ...prev.header, isHotCase: nextVal } }
           : prev
       )
+      onHotCaseChanged?.(detail.trackingItemId, nextVal)
     } catch {
       // silently ignore
     } finally {
@@ -1762,6 +1919,32 @@ export function ResidentDetailModal({ trackingItemId, companyId, state, open, on
       setSavingFields(false)
     }
   }
+
+  function firstFieldValue(name: string): string | null {
+    if (!detail) return null
+    const target = name.toLowerCase()
+    for (const section of detail.sections) {
+      for (const f of section.fields) {
+        if (f.fieldName.toLowerCase() === target) {
+          const v = f.value
+          return v == null ? null : String(v)
+        }
+      }
+    }
+    for (const f of detail.fields) {
+      if (f.fieldName.toLowerCase() === target) {
+        const v = f.value
+        return v == null ? null : String(v)
+      }
+    }
+    return null
+  }
+
+  const attachmentUniqueId = firstFieldValue("uniqueid")
+  const attachmentResidentId =
+    firstFieldValue("residentid") ??
+    firstFieldValue("resstayID") ??
+    firstFieldValue("cid")
 
   const initials = (detail?.header?.residentName ?? "?")
     .split(/[\s,]+/)
@@ -1856,51 +2039,8 @@ export function ResidentDetailModal({ trackingItemId, companyId, state, open, on
                     <Flame className="h-3.5 w-3.5" />
                     {detail.header?.isHotCase ? "Remove Hot Case" : "Mark Hot Case"}
                   </Button>
-                  {!isEditingFields ? (
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      className="gap-1.5 rounded-lg border-slate-300 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                      onClick={() => startEditingFields()}
-                    >
-                      <Edit className="h-3.5 w-3.5" /> Edit Resident
-                    </Button>
-                  ) : (
-                    <>
-                      <Button
-                        variant="outline"
-                        size="sm"
-                        className="gap-1.5 rounded-lg border-slate-300 px-4 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                        onClick={() => cancelEditingFields()}
-                        disabled={savingFields}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        size="sm"
-                        className="gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow hover:bg-blue-700"
-                        onClick={() => void saveFields()}
-                        disabled={savingFields}
-                      >
-                        {savingFields ? (
-                          <>
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
-                          </>
-                        ) : (
-                          <>
-                            <CheckCircle2 className="h-3.5 w-3.5" /> Save Changes
-                          </>
-                        )}
-                      </Button>
-                    </>
-                  )}
-                  <Button
-                    size="sm"
-                    className="gap-1.5 rounded-lg bg-blue-600 px-4 text-sm font-semibold text-white shadow hover:bg-blue-700"
-                    onClick={() => window.print()}
-                  >
-                    <Printer className="h-3.5 w-3.5" /> Print Summary
-                  </Button>
+               
+               
                 </div>
               </div>
             </div>
@@ -1946,11 +2086,13 @@ export function ResidentDetailModal({ trackingItemId, companyId, state, open, on
               {activeTab === "Notes" && (
                 <NotesTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
               )}
-              {activeTab === "Emails" && (
-                <EmailsTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
-              )}
               {activeTab === "Attachments" && (
-                <AttachmentsTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
+                <AttachmentsTab
+                  trackingItemId={detail.trackingItemId}
+                  companyId={detail.companyId}
+                  uniqueId={attachmentUniqueId}
+                  residentId={attachmentResidentId}
+                />
               )}
             </div>
           </div>

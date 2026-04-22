@@ -118,6 +118,10 @@ export type ResidentAttachment = {
   contentType: string
   fileSizeBytes: number | null
   blobUrl: string
+  blobContainer?: string
+  blobName?: string
+  uniqueId?: string | null
+  residentId?: string | null
   uploadedAt: string
   uploadedBy: string | null
   description: string | null
