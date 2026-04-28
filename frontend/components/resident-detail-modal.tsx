@@ -1,8 +1,9 @@
 "use client"
 
-import React, { useCallback, useEffect, useRef, useState } from "react"
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ArrowRightLeft,
+  Bold,
   Building2,
   Calendar,
   CheckCircle2,
@@ -17,6 +18,9 @@ import {
   Loader2,
   LogIn,
   Highlighter,
+  Italic,
+  List,
+  ListOrdered,
   LogOut,
   Paperclip,
   Pin,
@@ -24,6 +28,7 @@ import {
   Printer,
   Send,
   Trash2,
+  Underline,
   Upload,
   X,
   FileImage,
@@ -387,7 +392,21 @@ function EditFieldView({
 
 // ─── OverviewTab ──────────────────────────────────────────────────────────────
 
-function OverviewTab({ detail, isEditing, editValues, onEditChange }: { detail: PendingTrackingDetailResponse; isEditing?: boolean; editValues?: Record<string, unknown>; onEditChange?: (fieldName: string, value: unknown) => void }) {
+function OverviewTab({
+  detail,
+  isEditing,
+  editValues,
+  onEditChange,
+  notesTrackingItemId,
+  notesCompanyId,
+}: {
+  detail: PendingTrackingDetailResponse
+  isEditing?: boolean
+  editValues?: Record<string, unknown>
+  onEditChange?: (fieldName: string, value: unknown) => void
+  notesTrackingItemId?: number
+  notesCompanyId?: number
+}) {
   const sections = detail.sections ?? []
   const sectionsToRender: ModalSectionMeta[] =
     sections.length === 0 && detail.fields.length > 0
@@ -411,16 +430,25 @@ function OverviewTab({ detail, isEditing, editValues, onEditChange }: { detail: 
   }
 
   return (
-    <div className="flex flex-col gap-5">
-      {sectionsToRender.map((section, i) => (
-        <SectionCard
-          key={section.modalSectionId ?? `gen-${i}`}
-          section={section}
-          isEditing={isEditing}
-          editValues={editValues}
-          onEditChange={onEditChange}
-        />
-      ))}
+    <div className="grid grid-cols-1 gap-5 xl:grid-cols-[minmax(0,1fr)_420px]">
+      <div className="flex flex-col gap-5">
+        {sectionsToRender.map((section, i) => (
+          <SectionCard
+            key={section.modalSectionId ?? `gen-${i}`}
+            section={section}
+            isEditing={isEditing}
+            editValues={editValues}
+            onEditChange={onEditChange}
+          />
+        ))}
+      </div>
+      <div className="h-[calc(96vh-280px)] min-h-[520px] rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
+        {notesTrackingItemId && notesCompanyId ? (
+          <NotesTab trackingItemId={notesTrackingItemId} companyId={notesCompanyId} />
+        ) : (
+          <p className="py-6 text-center text-sm text-slate-400">Notes are not available.</p>
+        )}
+      </div>
     </div>
   )
 }
@@ -905,13 +933,23 @@ function NotesTab({
 }) {
   const [notes, setNotes] = useState<ResidentNote[]>([])
   const [loading, setLoading] = useState(true)
-  const [body, setBody] = useState("")
-  const [noteType, setNoteType] = useState("CaseNote")
+  const [bodyHtml, setBodyHtml] = useState("")
   const [saving, setSaving] = useState(false)
+  const [editingNoteId, setEditingNoteId] = useState<number | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ResidentNote | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const [phBusy, setPhBusy] = useState<{
     noteId: number
     kind: "pin" | "hl"
   } | null>(null)
+  const editorRef = useRef<HTMLDivElement | null>(null)
+
+  function resizeEditor() {
+    if (!editorRef.current) return
+    editorRef.current.style.height = "auto"
+    const next = Math.max(120, editorRef.current.scrollHeight)
+    editorRef.current.style.height = `${next}px`
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -929,28 +967,70 @@ function NotesTab({
 
   useEffect(() => { void load() }, [load])
 
-  async function addNote() {
-    const text = body.trim()
-    if (!text) return
+  async function saveNote() {
+    const html = bodyHtml.trim()
+    const plain = html.replace(/<[^>]+>/g, "").trim()
+    if (!plain) return
     setSaving(true)
     try {
-      await apiPost(`/api/pending-tracking/${trackingItemId}/notes`, {
-        companyId,
-        body: text,
-        noteType,
-      })
-      setBody("")
+      if (editingNoteId != null) {
+        await apiPatch(`/api/pending-tracking/${trackingItemId}/notes/${editingNoteId}`, {
+          companyId,
+          body: html,
+        })
+      } else {
+        await apiPost(`/api/pending-tracking/${trackingItemId}/notes`, {
+          companyId,
+          body: html,
+          noteType: "CaseNote",
+        })
+      }
+      setBodyHtml("")
+      setEditingNoteId(null)
+      if (editorRef.current) editorRef.current.innerHTML = ""
+      resizeEditor()
       await load()
     } finally {
       setSaving(false)
     }
   }
 
-  async function deleteNote(noteId: number) {
+  function startEdit(n: ResidentNote) {
+    setEditingNoteId(n.noteId)
+    setBodyHtml(n.body ?? "")
+    if (editorRef.current) {
+      editorRef.current.innerHTML = n.body ?? ""
+      editorRef.current.focus()
+    }
+    resizeEditor()
+  }
+
+  function cancelEdit() {
+    setEditingNoteId(null)
+    setBodyHtml("")
+    if (editorRef.current) editorRef.current.innerHTML = ""
+    resizeEditor()
+  }
+
+  function applyEditorCommand(command: string) {
+    if (!editorRef.current) return
+    editorRef.current.focus()
+    document.execCommand(command)
+    setBodyHtml(editorRef.current.innerHTML)
+  }
+
+  async function confirmDeleteNote() {
+    if (!deleteTarget) return
+    setDeleting(true)
     await apiDelete(
-      `/api/pending-tracking/${trackingItemId}/notes/${noteId}?companyId=${companyId}`
+      `/api/pending-tracking/${trackingItemId}/notes/${deleteTarget.noteId}?companyId=${companyId}`
     )
+    if (editingNoteId === deleteTarget.noteId) {
+      cancelEdit()
+    }
+    setDeleteTarget(null)
     await load()
+    setDeleting(false)
   }
 
   async function togglePin(n: ResidentNote) {
@@ -979,51 +1059,58 @@ function NotesTab({
     }
   }
 
-  const NOTE_TYPE_COLOR: Record<string, string> = {
-    CaseNote: "bg-blue-100 text-blue-700",
-    Internal: "bg-violet-100 text-violet-700",
-    External: "bg-teal-100 text-teal-700",
-  }
-
   if (loading) return <Loader2 className="mx-auto mt-12 h-6 w-6 animate-spin text-slate-400" />
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex h-full min-h-0 flex-col gap-4">
       {/* compose */}
       <div className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm">
-        <h3 className="mb-4 text-[11px] font-bold uppercase tracking-widest text-slate-500">New Note</h3>
-        <div className="mb-3 flex gap-2">
-          {(["CaseNote", "Internal", "External"] as const).map((t) => (
-            <button
-              key={t}
-              type="button"
-              onClick={() => setNoteType(t)}
-              className={cn(
-                "rounded-full px-3 py-1 text-[11px] font-bold transition",
-                noteType === t
-                  ? NOTE_TYPE_COLOR[t]
-                  : "bg-slate-100 text-slate-500 hover:bg-slate-200"
-              )}
-            >
-              {t}
-            </button>
-          ))}
+        <div className="mb-2 flex flex-wrap items-center gap-1">
+          <button type="button" className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100" onClick={() => applyEditorCommand("bold")} title="Bold">
+            <Bold className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100" onClick={() => applyEditorCommand("italic")} title="Italic">
+            <Italic className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100" onClick={() => applyEditorCommand("underline")} title="Underline">
+            <Underline className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100" onClick={() => applyEditorCommand("insertUnorderedList")} title="Bulleted list">
+            <List className="h-3.5 w-3.5" />
+          </button>
+          <button type="button" className="rounded border border-slate-200 p-1.5 text-slate-600 hover:bg-slate-100" onClick={() => applyEditorCommand("insertOrderedList")} title="Numbered list">
+            <ListOrdered className="h-3.5 w-3.5" />
+          </button>
         </div>
-        <textarea
-          className="w-full resize-none rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 placeholder:text-slate-400 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50"
-          rows={4}
-          placeholder="Type a case note…"
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
+        <div
+          ref={editorRef}
+          contentEditable
+          suppressContentEditableWarning
+          className="min-h-[120px] w-full overflow-hidden rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-200/50 [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5 [&:empty:before]:pointer-events-none [&:empty:before]:text-slate-400 [&:empty:before]:content-[attr(data-placeholder)]"
+          onInput={(e) => {
+            setBodyHtml((e.target as HTMLDivElement).innerHTML)
+            resizeEditor()
+          }}
+          data-placeholder="Type a note..."
         />
         <div className="mt-3 flex justify-end">
+          {editingNoteId != null ? (
+            <Button
+              variant="ghost"
+              className="mr-2 gap-1.5 rounded-lg px-4 text-sm font-semibold"
+              onClick={cancelEdit}
+              disabled={saving}
+            >
+              Cancel
+            </Button>
+          ) : null}
           <Button
             className="gap-1.5 rounded-lg bg-blue-600 px-5 text-sm font-semibold text-white hover:bg-blue-700"
-            disabled={saving || !body.trim()}
-            onClick={addNote}
+            disabled={saving || !bodyHtml.replace(/<[^>]+>/g, "").trim()}
+            onClick={saveNote}
           >
             {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Send className="h-3.5 w-3.5" />}
-            Submit Note
+            {editingNoteId != null ? "Save Note" : "Submit Note"}
           </Button>
         </div>
       </div>
@@ -1032,7 +1119,8 @@ function NotesTab({
       {notes.length === 0 ? (
         <p className="text-center text-sm text-slate-400">No notes yet.</p>
       ) : (
-        <div className="flex flex-col gap-3">
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
+          <div className="flex flex-col gap-3">
           {notes.map((n) => (
             <div
               key={n.noteId}
@@ -1045,8 +1133,9 @@ function NotesTab({
               )}
             >
               <div className="mb-2 flex items-center justify-between gap-2">
-                <span className={cn("rounded-full px-2.5 py-0.5 text-[10px] font-bold", NOTE_TYPE_COLOR[n.noteType] ?? "bg-slate-100 text-slate-500")}>
-                  {n.noteType}
+                <span className="text-[11px] text-slate-400">
+                  {new Date(n.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
+                  {n.createdBy ? ` · ${n.createdBy}` : ""}
                 </span>
                 <div className="flex items-center gap-1">
                   <button
@@ -1085,23 +1174,60 @@ function NotesTab({
                       <Highlighter className="h-3.5 w-3.5" />
                     )}
                   </button>
-                  <span className="mx-1 text-[11px] text-slate-400">
-                    {new Date(n.createdAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit" })}
-                    {n.createdBy ? ` · ${n.createdBy}` : ""}
-                  </span>
+                  <button
+                    type="button"
+                    title="Edit note"
+                    onClick={() => startEdit(n)}
+                    className="rounded p-1 text-slate-300 hover:bg-blue-50 hover:text-blue-500"
+                  >
+                    <Edit className="h-3.5 w-3.5" />
+                  </button>
                   <button
                     type="button"
                     title="Delete note"
-                    onClick={() => deleteNote(n.noteId)}
+                    onClick={() => setDeleteTarget(n)}
                     className="rounded p-1 text-slate-300 hover:bg-red-50 hover:text-red-400"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 </div>
               </div>
-              <p className="whitespace-pre-wrap text-sm text-slate-700">{n.body}</p>
+              <div
+                className="max-w-none whitespace-pre-wrap break-words text-sm leading-6 text-slate-700 [&_ol]:list-decimal [&_ol]:pl-5 [&_ul]:list-disc [&_ul]:pl-5"
+                dangerouslySetInnerHTML={{ __html: n.body }}
+              />
             </div>
           ))}
+          </div>
+        </div>
+      )}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/50">
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-xl">
+            <h4 className="text-lg font-semibold text-slate-900">Delete Note</h4>
+            <p className="mt-2 text-sm text-slate-500">
+              Are you sure you want to delete this note?
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={deleting}
+                onClick={() => setDeleteTarget(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                className="bg-red-600 text-white hover:bg-red-700"
+                disabled={deleting}
+                onClick={confirmDeleteNote}
+              >
+                {deleting ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : null}
+                Delete
+              </Button>
+            </div>
+          </div>
         </div>
       )}
     </div>
@@ -1737,29 +1863,68 @@ function CensusTab() {
 // ─── FinancialTab ────────────────────────────────────────────────────────────
 
 function formatPivotMoney(n: number | null): string {
-  if (n == null || !Number.isFinite(n)) return "—"
+  if (n == null || !Number.isFinite(n)) return "-"
   return n.toLocaleString("en-US", { style: "currency", currency: "USD" })
 }
 
-function sortPivotRows(rows: CensusBalanceRow[]): CensusBalanceRow[] {
-  return [...rows].sort((a, b) => {
-    const ya = a.yearMonth ?? 0
-    const yb = b.yearMonth ?? 0
-    if (ya !== yb) return yb - ya
-    const da = a.month ?? ""
-    const db = b.month ?? ""
-    return db.localeCompare(da)
-  })
+function formatYearMonthLabel(yearMonth: number): string {
+  const s = String(yearMonth)
+  if (!/^\d{6}$/.test(s)) return s
+  const year = Number(s.slice(0, 4))
+  const month = Number(s.slice(4, 6))
+  if (!Number.isFinite(year) || !Number.isFinite(month) || month < 1 || month > 12) return s
+  const dt = new Date(year, month - 1, 1)
+  return dt.toLocaleDateString("en-US", { month: "long", year: "numeric" })
+}
+
+type FinancialPivot = {
+  columns: number[]
+  rows: Array<{ payer: string; values: Record<number, number>; total: number }>
+  grandTotal: number
+}
+
+function buildFinancialPivot(rows: CensusBalanceRow[]): FinancialPivot {
+  const monthSet = new Set<number>()
+  const payerMap = new Map<string, Map<number, number>>()
+
+  for (const row of rows) {
+    if (row.yearMonth == null || !Number.isFinite(row.yearMonth)) continue
+    const ym = row.yearMonth
+    const amount = row.balance ?? 0
+    if (!Number.isFinite(amount)) continue
+    monthSet.add(ym)
+    const payer = (row.payerName ?? row.payerType ?? "Unknown").trim() || "Unknown"
+    const monthTotals = payerMap.get(payer) ?? new Map<number, number>()
+    monthTotals.set(ym, (monthTotals.get(ym) ?? 0) + amount)
+    payerMap.set(payer, monthTotals)
+  }
+
+  const columns = [...monthSet].sort((a, b) => a - b)
+  const pivotRows = [...payerMap.entries()]
+    .map(([payer, monthTotals]) => {
+      const values: Record<number, number> = {}
+      let total = 0
+      for (const ym of columns) {
+        const value = monthTotals.get(ym) ?? 0
+        values[ym] = value
+        total += value
+      }
+      return { payer, values, total }
+    })
+    .sort((a, b) => a.payer.localeCompare(b.payer))
+
+  const grandTotal = pivotRows.reduce((sum, r) => sum + r.total, 0)
+  return { columns, rows: pivotRows, grandTotal }
 }
 
 function FinancialTab({ residentId }: { residentId: string | null }) {
-  const [pivotRows, setPivotRows] = useState<CensusBalanceRow[]>([])
+  const [sourceRows, setSourceRows] = useState<CensusBalanceRow[]>([])
   const [pivotLoading, setPivotLoading] = useState(false)
   const [pivotError, setPivotError] = useState<string | null>(null)
 
   const loadPivot = useCallback(async () => {
     if (!residentId?.trim()) {
-      setPivotRows([])
+      setSourceRows([])
       setPivotError(null)
       setPivotLoading(false)
       return
@@ -1769,13 +1934,13 @@ function FinancialTab({ residentId }: { residentId: string | null }) {
     try {
       const result = await fetchCensusByResidentId(residentId)
       if (result.error) {
-        setPivotRows([])
+        setSourceRows([])
         setPivotError(result.error)
         return
       }
-      setPivotRows(sortPivotRows(result.rows))
+      setSourceRows(result.rows)
     } catch (e) {
-      setPivotRows([])
+      setSourceRows([])
       setPivotError(e instanceof Error ? e.message : "Failed to load Power BI data.")
     } finally {
       setPivotLoading(false)
@@ -1786,14 +1951,13 @@ function FinancialTab({ residentId }: { residentId: string | null }) {
     void loadPivot()
   }, [loadPivot])
 
+  const pivot = useMemo(() => buildFinancialPivot(sourceRows), [sourceRows])
+
   return (
     <div className="flex flex-col gap-4">
       <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
-          <h3 className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-slate-500">
-            <DollarSign className="h-4 w-4" />
-            Balance by month (Power BI)
-          </h3>
+          <div />
           <Button
             type="button"
             size="sm"
@@ -1817,37 +1981,47 @@ function FinancialTab({ residentId }: { residentId: string | null }) {
             <Loader2 className="h-5 w-5 animate-spin" />
             Loading financial pivot…
           </div>
-        ) : pivotRows.length === 0 ? (
+        ) : pivot.rows.length === 0 ? (
           <p className="py-6 text-sm text-slate-400">No balance rows returned for this resident.</p>
         ) : (
           <div className="overflow-x-auto">
-            <table className="w-full min-w-[640px] text-left text-sm">
+            <table className="w-full min-w-[680px] text-left text-sm">
               <thead>
                 <tr className="border-b border-slate-100 text-[10px] font-bold uppercase tracking-wider text-slate-400">
-                  <th className="pb-2 pr-3">Month</th>
-                  <th className="pb-2 pr-3">YearMonth</th>
-                  <th className="pb-2 pr-3">Payer</th>
-                  <th className="pb-2 pr-3">Payer type</th>
-                  <th className="pb-2 pr-3 text-right">Balance</th>
-                  <th className="pb-2">Fac / Patient</th>
+                  <th className="pb-2 pr-2">Payor</th>
+                  {pivot.columns.map((ym) => (
+                    <th key={ym} className="pb-2 pr-2 text-right whitespace-nowrap">{formatYearMonthLabel(ym)}</th>
+                  ))}
+                  <th className="pb-2 text-right">Total</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {pivotRows.map((r, i) => (
-                  <tr key={`${r.yearMonth ?? i}-${r.month ?? i}-${i}`} className="text-slate-700">
-                    <td className="py-2 pr-3 font-medium">{r.month ? formatDateDisplay(r.month) : "—"}</td>
-                    <td className="py-2 pr-3 font-mono text-xs">{r.yearMonth ?? "—"}</td>
-                    <td className="py-2 pr-3">{r.payerName ?? "—"}</td>
-                    <td className="py-2 pr-3">{r.payerType ?? "—"}</td>
-                    <td className="py-2 pr-3 text-right font-semibold">{formatPivotMoney(r.balance)}</td>
-                    <td className="py-2 text-[11px] text-slate-500">
-                      {r.facId ? <span className="mr-2">Fac: {r.facId}</span> : null}
-                      {r.patientId ? <span>Pat: {r.patientId}</span> : null}
-                      {!r.facId && !r.patientId ? "—" : null}
-                    </td>
+                {pivot.rows.map((r) => (
+                  <tr key={r.payer} className="text-slate-700">
+                    <td className="py-2 pr-2 font-medium">{r.payer}</td>
+                    {pivot.columns.map((ym) => (
+                      <td key={`${r.payer}-${ym}`} className="py-2 pr-2 text-right font-semibold whitespace-nowrap">
+                        {r.values[ym] ? formatPivotMoney(r.values[ym]) : "-"}
+                      </td>
+                    ))}
+                    <td className="py-2 text-right font-bold">{formatPivotMoney(r.total)}</td>
                   </tr>
                 ))}
               </tbody>
+              <tfoot>
+                <tr className="border-t border-slate-200 bg-slate-50 text-slate-800">
+                  <td className="py-2 pr-2 text-xs font-bold uppercase tracking-wide">Grand Total</td>
+                  {pivot.columns.map((ym) => {
+                    const columnTotal = pivot.rows.reduce((sum, r) => sum + (r.values[ym] ?? 0), 0)
+                    return (
+                      <td key={`total-${ym}`} className="py-2 pr-2 text-right font-bold whitespace-nowrap">
+                        {columnTotal ? formatPivotMoney(columnTotal) : "-"}
+                      </td>
+                    )
+                  })}
+                  <td className="py-2 text-right font-bold">{formatPivotMoney(pivot.grandTotal)}</td>
+                </tr>
+              </tfoot>
             </table>
           </div>
         )}
@@ -1863,14 +2037,13 @@ function FinancialTab({ residentId }: { residentId: string | null }) {
 
 // ─── ResidentDetailModal ──────────────────────────────────────────────────────
 
-type Tab = "Overview" | "Census" | "Financial" | "Tasks" | "Notes" | "Attachments"
-const TABS: Tab[] = ["Overview", "Census", "Financial", "Tasks", "Notes", "Attachments"]
+type Tab = "Overview" | "Census" | "Financial" | "Tasks" | "Attachments"
+const TABS: Tab[] = ["Overview", "Census", "Financial", "Tasks", "Attachments"]
 const TAB_ICONS: Record<Tab, React.ElementType> = {
   Overview: LayoutGrid,
   Census: History,
   Financial: DollarSign,
   Tasks: CheckSquare2,
-  Notes: FileText,
   Attachments: Paperclip,
 }
 
@@ -2218,15 +2391,14 @@ export function ResidentDetailModal({
                   isEditing={isEditingFields}
                   editValues={fieldEditValues}
                   onEditChange={(fieldName, value) => setFieldEditValues(prev => ({ ...prev, [fieldName]: value }))}
+                  notesTrackingItemId={detail.trackingItemId}
+                  notesCompanyId={detail.companyId}
                 />
               )}
               {activeTab === "Census" && <CensusTab />}
               {activeTab === "Financial" && <FinancialTab residentId={censusResidentId} />}
               {activeTab === "Tasks" && (
                 <TasksTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
-              )}
-              {activeTab === "Notes" && (
-                <NotesTab trackingItemId={detail.trackingItemId} companyId={detail.companyId} />
               )}
               {activeTab === "Attachments" && (
                 <AttachmentsTab

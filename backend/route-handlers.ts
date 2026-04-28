@@ -1018,7 +1018,9 @@ export async function getNotes(req: Request, res: Response) {
         CAST(ISNULL(IsPinned, 0) AS BIT) AS IsPinned,
         CAST(ISNULL(IsHighlighted, 0) AS BIT) AS IsHighlighted
       FROM dbo.ResidentNote
-      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE TrackingItemId = @trackingItemId
+        AND CompanyId = @companyId
+        AND ISNULL(Body, '') <> '__SOFT_DELETED__'
       ORDER BY CASE WHEN ISNULL(IsPinned, 0) = 1 THEN 0 ELSE 1 END, CreatedAt DESC
     `)
     const notes = result.recordset.map((row: Record<string, unknown>) => ({
@@ -1175,7 +1177,10 @@ export async function deleteNote(req: Request, res: Response) {
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
     await r.query(`
-      DELETE FROM dbo.ResidentNote
+      UPDATE dbo.ResidentNote
+      SET Body = '__SOFT_DELETED__',
+          IsPinned = 0,
+          IsHighlighted = 0
       WHERE NoteId = @noteId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId
     `)
     res.json({ ok: true })
