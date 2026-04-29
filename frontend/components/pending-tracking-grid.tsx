@@ -23,9 +23,11 @@ import { toast } from "sonner"
 import { apiDelete, apiGet, apiPut } from "@/services/api"
 import { cn } from "@/lib/utils"
 import type {
+  ConditionalFormattingRule,
   GridColumnMeta,
   PendingTrackingGridResponse,
 } from "@/lib/pending-tracking/types"
+import { evaluateConditionFormula, type ConditionNode } from "@/lib/conditional-formatting"
 import {
   formatCellForColumn,
   parseBooleanFromCell,
@@ -67,6 +69,152 @@ function formatDateDisplay(v: unknown): string {
   if (!s) return "—"
   const [y, m, d] = s.split("-")
   return `${m}/${d}/${y}`
+}
+
+function formatGridCellDisplay(value: unknown, col: GridColumnMeta): string {
+  if (col.type !== "dropdown") {
+    return formatCellForColumn(value, col.type)
+  }
+  if (value === null || value === undefined || value === "") return "—"
+
+  const options = col.dropdownOptions ?? []
+  const asNumber =
+    typeof value === "number"
+      ? value
+      : typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value))
+        ? Number(value)
+        : null
+
+  const byId =
+    asNumber == null
+      ? undefined
+      : options.find((o) => o.optionId === asNumber)
+  if (byId) return byId.label || byId.value
+
+  const raw = String(value).trim().toLowerCase()
+  const byValueOrLabel = options.find(
+    (o) => o.value.trim().toLowerCase() === raw || o.label.trim().toLowerCase() === raw
+  )
+  if (byValueOrLabel) return byValueOrLabel.label || byValueOrLabel.value
+
+  return String(value)
+}
+
+function normalizeValue(value: unknown): string {
+  return String(value ?? "").trim().toLowerCase()
+}
+
+function toComparable(value: unknown): number | string {
+  if (value == null) return ""
+  const num = Number(value)
+  if (Number.isFinite(num)) return num
+  const dt = new Date(String(value))
+  if (!Number.isNaN(dt.getTime())) return dt.getTime()
+  return String(value).toLowerCase()
+}
+
+function evaluateConditionTree(node: ConditionNode, row: Record<string, unknown>): boolean {
+  if (node.type === "group") {
+    const results = node.children.map((child) => evaluateConditionTree(child, row))
+    return node.join === "AND" ? results.every(Boolean) : results.some(Boolean)
+  }
+  const actual = row[node.fieldKey]
+  const expected = node.value
+  switch (node.operator) {
+    case "=":
+      return normalizeValue(actual) === normalizeValue(expected)
+    case "!=":
+      return normalizeValue(actual) !== normalizeValue(expected)
+    case ">":
+      return toComparable(actual) > toComparable(expected)
+    case ">=":
+      return toComparable(actual) >= toComparable(expected)
+    case "<":
+      return toComparable(actual) < toComparable(expected)
+    case "<=":
+      return toComparable(actual) <= toComparable(expected)
+    case "contains":
+      return normalizeValue(actual).includes(normalizeValue(expected))
+    case "not_contains":
+      return !normalizeValue(actual).includes(normalizeValue(expected))
+    case "starts_with":
+      return normalizeValue(actual).startsWith(normalizeValue(expected))
+    case "ends_with":
+      return normalizeValue(actual).endsWith(normalizeValue(expected))
+    case "is_blank":
+      return actual === null || actual === undefined || String(actual).trim() === ""
+    case "is_not_blank":
+      return !(actual === null || actual === undefined || String(actual).trim() === "")
+    default:
+      return false
+  }
+}
+
+function applyConditionalFormattingToRow(
+  row: Record<string, unknown>,
+  rules: ConditionalFormattingRule[]
+): Record<string, unknown> {
+  if (rules.length === 0) return row
+
+  let rowWinner: { score: number; color: string } | null = null
+  const fieldWinners = new Map<string, { score: number; color: string }>()
+
+  for (const rule of rules) {
+    const matched =
+      (rule.conditionFormula ?? "").trim()
+        ? evaluateConditionFormula(rule.conditionFormula ?? "", row)
+        : evaluateConditionTree(rule.conditionTree as ConditionNode, row)
+    if (!matched) continue
+
+    const score = rule.sortOrder + (rule.applyTo === "field" ? 100000 : 0)
+    if (rule.applyTo === "row") {
+      if (!rowWinner || score > rowWinner.score) {
+        rowWinner = { score, color: rule.backgroundColor }
+      }
+    } else {
+      if (!rule.targetFieldKey) continue
+      const prev = fieldWinners.get(rule.targetFieldKey)
+      if (!prev || score > prev.score) {
+        fieldWinners.set(rule.targetFieldKey, { score, color: rule.backgroundColor })
+      }
+    }
+  }
+
+  const next: Record<string, unknown> = { ...row }
+  delete next.__rowColor
+  delete next.__fieldColors
+
+  if (rowWinner) next.__rowColor = rowWinner.color
+  if (fieldWinners.size > 0) {
+    const fieldColors: Record<string, string> = {}
+    for (const [k, v] of fieldWinners.entries()) fieldColors[k] = v.color
+    next.__fieldColors = fieldColors
+  }
+  return next
+}
+
+function resolveRowColor(row: Record<string, unknown>): string | null {
+  const raw = row.__rowColor
+  return typeof raw === "string" && raw.trim() ? raw.trim() : null
+}
+
+function resolveFieldColor(
+  row: Record<string, unknown>,
+  col: GridColumnMeta
+): string | null {
+  const raw = row.__fieldColors
+  if (!raw || typeof raw !== "object") return null
+  const fieldColors = raw as Record<string, unknown>
+  const keyMatch = fieldColors[col.fieldName]
+  if (typeof keyMatch === "string" && keyMatch.trim()) return keyMatch.trim()
+
+  const target = col.fieldName.toLowerCase()
+  for (const [k, v] of Object.entries(fieldColors)) {
+    if (k.toLowerCase() === target && typeof v === "string" && v.trim()) {
+      return v.trim()
+    }
+  }
+  return null
 }
 
 /* ─── Inline edit cell ────────────────────────────────── */
@@ -235,6 +383,7 @@ export function PendingTrackingGrid({
   const [deleting, setDeleting] = useState(false)
   const [columnPrefs, setColumnPrefs] = useState<GridColumnPrefs | null>(null)
   const [colSettingsOpen, setColSettingsOpen] = useState(false)
+  const [formattingRules, setFormattingRules] = useState<ConditionalFormattingRule[]>([])
 
   const skipLoadAfterSortSyncRef = useRef(false)
 
@@ -279,6 +428,7 @@ export function PendingTrackingGrid({
       const cols = (data.columns ?? []) as GridColumnMeta[]
       setColumns(cols)
       setRows((data.rows ?? []) as Record<string, unknown>[])
+      setFormattingRules(data.formattingRules ?? [])
       setTotalCount(Number(data.totalCount ?? 0))
       const nextSort =
         cols.length > 0 && cols.some((c) => c.key === sortBy)
@@ -291,6 +441,7 @@ export function PendingTrackingGrid({
     } catch (e) {
       setColumns([])
       setRows([])
+      setFormattingRules([])
       setTotalCount(0)
       const aborted =
         typeof e === "object" && e !== null && "name" in e &&
@@ -333,6 +484,12 @@ export function PendingTrackingGrid({
     [columns, columnPrefs]
   )
 
+  // Re-evaluate conditional formatting locally whenever row content or rules change.
+  const displayRows = useMemo(
+    () => rows.map((row) => applyConditionalFormattingToRow(row, formattingRules)),
+    [rows, formattingRules]
+  )
+
   const detailLinkColumnKey = useMemo(() => {
     const marked = displayColumns.find((c) => c.opensResidentDetail)
     return marked?.key ?? displayColumns[0]?.key ?? null
@@ -368,6 +525,21 @@ export function PendingTrackingGrid({
 
   async function saveCellEdit(rowId: number, col: GridColumnMeta) {
     const value = editValueRef.current
+    const normalizedValue =
+      col.type === "dropdown"
+        ? (() => {
+            if (value == null || value === "") return ""
+            const selectedId =
+              typeof value === "number"
+                ? value
+                : Number.isFinite(Number(value))
+                  ? Number(value)
+                  : null
+            if (selectedId == null) return value
+            const opt = col.dropdownOptions?.find((o) => o.optionId === selectedId)
+            return opt ? (opt.label || opt.value) : value
+          })()
+        : value
     setEditingCell(null)
     setEditValue(undefined)
     setSavingCell({ rowId, colKey: col.key })
@@ -383,7 +555,7 @@ export function PendingTrackingGrid({
       setRows((prev) =>
         prev.map((r) => {
           if (getTrackingItemIdFromRow(r) !== rowId) return r
-          return { ...r, [col.key]: value }
+          return { ...r, [col.key]: normalizedValue }
         })
       )
     } catch (e) {
@@ -439,7 +611,7 @@ export function PendingTrackingGrid({
     if (col.type === "date") {
       return <span className="text-sm text-slate-700">{formatDateDisplay(raw)}</span>
     }
-    return <span className="text-sm text-slate-700">{formatCellForColumn(raw, col.type)}</span>
+    return <span className="text-sm text-slate-700">{formatGridCellDisplay(raw, col)}</span>
   }
 
   /* ═══════════════════════════════════════════════════════
@@ -506,7 +678,7 @@ export function PendingTrackingGrid({
                   <td className="px-6 py-8 text-red-500" colSpan={displayColumns.length + 2}>{error}</td>
                 </tr>
               )}
-              {!loading && !error && rows.map((row, rowIndex) => {
+              {!loading && !error && displayRows.map((row, rowIndex) => {
                 const id = getTrackingItemIdFromRow(row)
                 const rowKey = id != null ? `ti-${id}` : `row-${rowIndex}`
                 const isHotCase = Boolean(
@@ -514,6 +686,7 @@ export function PendingTrackingGrid({
                   getRowValueForKey(row, "isHotCase")
                 )
                 const isStoppedRow = includeInactive && rowIsInactive(row)
+                const conditionalRowColor = resolveRowColor(row)
 
                 return (
                   <tr
@@ -526,6 +699,11 @@ export function PendingTrackingGrid({
                           ? "border-l-4 border-l-orange-400 bg-orange-50/30 hover:bg-orange-50/60"
                           : "hover:bg-slate-50/70"
                     )}
+                    style={
+                      !isStoppedRow && conditionalRowColor
+                        ? { backgroundColor: conditionalRowColor }
+                        : undefined
+                    }
                   >
                     <td className="px-2 py-2.5 text-center align-middle">
                       {isHotCase ? (
@@ -540,6 +718,7 @@ export function PendingTrackingGrid({
                       const isCellEditing = editingCell?.rowId === id && editingCell?.colKey === col.key
                       const isCellSaving = savingCell?.rowId === id && savingCell?.colKey === col.key
                       const isDetailLink = detailLinkColumnKey != null && col.key === detailLinkColumnKey
+                      const conditionalFieldColor = resolveFieldColor(row, col)
 
                       return (
                         <td
@@ -551,6 +730,11 @@ export function PendingTrackingGrid({
                               ? "min-w-[12rem]"
                               : ""
                           )}
+                          style={
+                            conditionalFieldColor
+                              ? { backgroundColor: conditionalFieldColor }
+                              : undefined
+                          }
                         >
                           {isCellSaving ? (
                             <span className="inline-flex items-center gap-1.5">
@@ -576,7 +760,7 @@ export function PendingTrackingGrid({
                               disabled={id == null}
                               onClick={() => id != null && openModal(id)}
                             >
-                              {formatCellForColumn(getRowValueForKey(row, col.key), col.type)}
+                              {formatGridCellDisplay(getRowValueForKey(row, col.key), col)}
                             </button>
                           ) : col.isEditable ? (
                             <div
@@ -672,7 +856,7 @@ export function PendingTrackingGrid({
                   </tr>
                 )
               })}
-              {!loading && !error && rows.length === 0 && (
+              {!loading && !error && displayRows.length === 0 && (
                 <tr>
                   <td className="px-6 py-12 text-slate-400" colSpan={displayColumns.length + 2}>
                     No records match your filters.

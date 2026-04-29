@@ -11,6 +11,7 @@
     "@azure/storage-blob": "^12.31.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.7",
+    "expr-eval": "^2.0.2",
     "express": "^4.21.2",
     "mssql": "^12.2.1",
     "multer": "^2.1.1",

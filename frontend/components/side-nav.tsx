@@ -73,6 +73,25 @@ export function SideNav({ collapsed, onToggleCollapse }: SideNavProps) {
         </div>
       )}
 
+      <div className="mb-3 px-2">
+        <button
+          type="button"
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          onClick={onToggleCollapse}
+          className={cn(
+            "flex w-full items-center gap-3 rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600",
+            collapsed ? "justify-center px-2 py-2.5" : "px-4 py-2.5"
+          )}
+        >
+          {collapsed ? (
+            <ChevronsRight className="h-5 w-5 shrink-0" />
+          ) : (
+            <ChevronsLeft className="h-5 w-5 shrink-0" />
+          )}
+          {!collapsed && <span className="text-sm font-medium">Collapse</span>}
+        </button>
+      </div>
+
       <nav className="flex-1 space-y-1 px-2">
         {mainNavItems.map((item) => {
           const active = isActivePath(pathname, item.href)
@@ -99,23 +118,6 @@ export function SideNav({ collapsed, onToggleCollapse }: SideNavProps) {
       </nav>
 
       <div className="mt-auto space-y-1 px-2">
-        <button
-          type="button"
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          onClick={onToggleCollapse}
-          className={cn(
-            "flex w-full items-center gap-3 rounded-lg text-slate-400 transition-all hover:bg-slate-100 hover:text-slate-600",
-            collapsed ? "justify-center px-2 py-3" : "px-4 py-3"
-          )}
-        >
-          {collapsed ? (
-            <ChevronsRight className="h-5 w-5 shrink-0" />
-          ) : (
-            <ChevronsLeft className="h-5 w-5 shrink-0" />
-          )}
-          {!collapsed && <span className="text-sm font-medium">Collapse</span>}
-        </button>
-
         {bottomNavItems.map((item) => (
           <Link
             key={item.label}

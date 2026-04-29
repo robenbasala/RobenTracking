@@ -128,6 +128,7 @@ function customResolvedExpression(dataType: string): string {
 
 export type GridQueryParams = {
   companyId: number
+  datasetId: string
   /** Tab / report key; passed to dbo.fn_PendingTracking_ReportEligibleItems as @reportKey. */
   viewType: string
   /** US state (2-letter), optional — filters FieldMetadataState when set. */
@@ -248,12 +249,11 @@ function buildGridPagedSelectSql(
   const selectList = selectParts.join(",\n    ")
 
   let reportFilterJoin = ""
-  let reportFilterWhere = ""
+  let reportFilterAnd = ""
   if (filterMode === "tvf") {
     reportFilterJoin = SQL_REPORT_ELIGIBLE_JOIN_TI
   } else if (filterMode === "legacy") {
-    reportFilterWhere = `
-  WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+    reportFilterAnd = `
     AND dbo.fn_PendingTracking_MatchesReport(@reportKey, ti.PayerType, ti.PayerName, ti.ViewType) = 1
     ${SQL_FILTER_FACILITY_LIST_TI}
     AND (@status IS NULL OR @status = N'' OR ti.Status = @status)
@@ -272,7 +272,9 @@ function buildGridPagedSelectSql(
   FROM dbo.TrackingItemsTbl ti
   ${reportFilterJoin}
   ${tfvJoin}
-  ${reportFilterWhere}
+  WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+    AND ti.DatasetId = @datasetId
+  ${reportFilterAnd}
   GROUP BY ti.TrackingItemId
 )
 SELECT *
@@ -347,11 +349,13 @@ export function parseGridPagedBatchRecordsets(
 export async function loadGridFieldMetadata(
   pool: ConnectionPool,
   companyId: number,
+  datasetId: string,
   payerType: string,
   state: string | null
 ): Promise<FieldMetadataRow[]> {
   return loadFieldMetadataForScreen(pool, {
     companyId,
+    datasetId,
     payerType,
     state,
     screenLocation: SCREEN_MAIN,
@@ -465,12 +469,15 @@ export function buildGridCountSql(
 SELECT COUNT(*) AS TotalCount
 FROM dbo.TrackingItemsTbl ti
 ${SQL_REPORT_ELIGIBLE_JOIN_TI}
+WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+  AND ti.DatasetId = @datasetId
 `
   }
   return `
 SELECT COUNT(*) AS TotalCount
 FROM dbo.TrackingItemsTbl ti
 WHERE ${activeRowFilterSql(params.includeInactive)}ti.CompanyId = @companyId
+  AND ti.DatasetId = @datasetId
   AND dbo.fn_PendingTracking_MatchesReport(@reportKey, ti.PayerType, ti.PayerName, ti.ViewType) = 1
   ${SQL_FILTER_FACILITY_LIST_TI}
   AND (@status IS NULL OR @status = N'' OR ti.Status = @status)
@@ -486,6 +493,7 @@ export function applyGridRequestInputs(
 ): void {
   const offset = (params.page - 1) * params.pageSize
   request.input("companyId", sql.Int, params.companyId)
+  request.input("datasetId", sql.NVarChar(64), params.datasetId)
   request.input("reportKey", sql.NVarChar(120), params.viewType)
   request.input("search", sql.NVarChar(200), params.search ?? null)
   const facilityCsv = sanitizeFacilityIdsForCsv(params.facilityIds)
@@ -502,12 +510,14 @@ export function applyGridRequestInputs(
 
 export async function fetchDropdownOptionsForFields(
   pool: ConnectionPool,
+  datasetId: string,
   fieldIds: number[]
 ): Promise<Map<number, { optionId: number; value: string; label: string }[]>> {
   const map = new Map<number, { optionId: number; value: string; label: string }[]>()
   if (fieldIds.length === 0) return map
   const placeholders = fieldIds.map((_, i) => `@id${i}`).join(", ")
   const r = pool.request()
+  r.input("datasetId", sql.NVarChar(64), datasetId)
   fieldIds.forEach((id, i) => r.input(`id${i}`, sql.Int, id))
   const result = await r.query<{
     FieldMetadataId: number
@@ -517,7 +527,7 @@ export async function fetchDropdownOptionsForFields(
   }>(`
     SELECT FieldMetadataId, FieldOptionId, OptionValue, OptionLabel
     FROM dbo.FieldMetadataOption
-    WHERE FieldMetadataId IN (${placeholders}) AND IsActive = 1
+    WHERE FieldMetadataId IN (${placeholders}) AND IsActive = 1 AND DatasetId = @datasetId
     ORDER BY FieldMetadataId, DisplayOrder, FieldOptionId
   `)
   for (const row of result.recordset) {

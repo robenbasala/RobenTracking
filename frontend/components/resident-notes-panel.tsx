@@ -40,7 +40,7 @@ export function ResidentNotesPanel({
   residentLabel,
   className,
 }: ResidentNotesPanelProps) {
-  const [expanded, setExpanded] = useState(true)
+  const [expanded, setExpanded] = useState(false)
   const [notes, setNotes] = useState<NoteDto[]>([])
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)

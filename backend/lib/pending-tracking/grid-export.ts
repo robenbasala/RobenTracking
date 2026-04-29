@@ -30,6 +30,7 @@ export async function loadGridExportRows(
   const fields = await loadGridFieldMetadata(
     pool,
     params.companyId,
+    params.datasetId,
     viewTypeRaw,
     state
   )
@@ -39,7 +40,11 @@ export async function loadGridExportRows(
     .filter((c) => c.type === "dropdown")
     .map((c) => c.fieldMetadataId)
   if (dropdownColIds.length > 0) {
-    const optionsMap = await fetchDropdownOptionsForFields(pool, dropdownColIds)
+    const optionsMap = await fetchDropdownOptionsForFields(
+      pool,
+      params.datasetId,
+      dropdownColIds
+    )
     for (const col of columns) {
       if (col.type === "dropdown") {
         col.dropdownOptions = optionsMap.get(col.fieldMetadataId) ?? []

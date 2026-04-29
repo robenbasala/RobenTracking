@@ -188,12 +188,14 @@ type TfRow = {
 
 async function fetchDropdownOptionsMap(
   pool: ConnectionPool,
+  datasetId: string,
   fieldIds: number[]
 ): Promise<Map<number, DetailDropdownOption[]>> {
   const map = new Map<number, DetailDropdownOption[]>()
   if (fieldIds.length === 0) return map
   const placeholders = fieldIds.map((_, i) => `@dd${i}`).join(", ")
   const r = pool.request()
+  r.input("datasetId", sql.NVarChar(64), datasetId)
   fieldIds.forEach((id, i) => r.input(`dd${i}`, sql.Int, id))
   const result = await r.query<{
     FieldMetadataId: number
@@ -203,7 +205,7 @@ async function fetchDropdownOptionsMap(
   }>(`
     SELECT FieldMetadataId, FieldOptionId, OptionValue, OptionLabel
     FROM dbo.FieldMetadataOption
-    WHERE FieldMetadataId IN (${placeholders}) AND IsActive = 1
+    WHERE FieldMetadataId IN (${placeholders}) AND IsActive = 1 AND DatasetId = @datasetId
     ORDER BY FieldMetadataId, DisplayOrder, FieldOptionId
   `)
   for (const row of result.recordset) {
@@ -221,10 +223,12 @@ async function fetchDropdownOptionsMap(
 
 async function fetchCustomValueRows(
   pool: ConnectionPool,
-  trackingItemId: number
+  trackingItemId: number,
+  datasetId: string
 ): Promise<Map<number, TfRow>> {
   const req = pool.request()
   req.input("trackingItemId", sql.Int, trackingItemId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   const result = await req.query<TfRow>(`
     SELECT
       tfv.FieldMetadataId,
@@ -239,6 +243,7 @@ async function fetchCustomValueRows(
     LEFT JOIN dbo.FieldMetadataOption opt
       ON opt.FieldOptionId = tfv.DropdownOptionId
     WHERE tfv.TrackingItemId = @trackingItemId
+      AND tfv.DatasetId = @datasetId
   `)
   const map = new Map<number, TfRow>()
   for (const r of result.recordset) {
@@ -282,9 +287,10 @@ function resolveCustomValue(
 export async function buildDetailResponse(
   pool: ConnectionPool,
   trackingItemId: number,
+  datasetId: string,
   state: string | null
 ): Promise<PendingTrackingDetailResponse | null> {
-  const baseRow = await fetchTrackingItemBase(pool, trackingItemId)
+  const baseRow = await fetchTrackingItemBase(pool, trackingItemId, datasetId)
   if (!baseRow) return null
 
   const companyId = Number(baseRow.CompanyId)
@@ -295,6 +301,7 @@ export async function buildDetailResponse(
 
   const fieldsMetaRaw = await loadFieldMetadataForScreen(pool, {
     companyId,
+    datasetId,
     payerType: viewType,
     state,
     screenLocation: SCREEN_DETAIL,
@@ -308,6 +315,7 @@ export async function buildDetailResponse(
     .map((f) => f.FieldMetadataId)
   const dropdownOptionsMap = await fetchDropdownOptionsMap(
     pool,
+    datasetId,
     dropdownFieldIds
   )
 
@@ -315,7 +323,7 @@ export async function buildDetailResponse(
     (f) => f.SourceType === "Custom" && !isCalculatedField(f)
   )
   const customMap = hasCustom
-    ? await fetchCustomValueRows(pool, trackingItemId)
+    ? await fetchCustomValueRows(pool, trackingItemId, datasetId)
     : new Map<number, TfRow>()
 
   const valueMap = new Map<string, unknown>()
@@ -388,10 +396,11 @@ export async function buildDetailResponse(
     const req2 = pool.request()
     const placeholders = sectionIds.map((_, i) => `@s${i}`).join(", ")
     sectionIds.forEach((id, i) => req2.input(`s${i}`, sql.Int, id))
+    req2.input("datasetId", sql.NVarChar(64), datasetId)
     const secResult = await req2.query<ModalSectionRow>(`
       SELECT ModalSectionId, SectionName, SectionType, DisplayOrder
       FROM dbo.ModalSection
-      WHERE ModalSectionId IN (${placeholders}) AND IsActive = 1
+      WHERE ModalSectionId IN (${placeholders}) AND IsActive = 1 AND DatasetId = @datasetId
     `)
     for (const r of secResult.recordset) {
       sectionMetaMap.set(r.ModalSectionId, r)

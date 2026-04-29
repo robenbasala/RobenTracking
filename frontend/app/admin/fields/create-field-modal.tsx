@@ -117,12 +117,14 @@ function toFormulaOperand(
 
 export function CreateFieldModal({
   companyId,
+  datasetId,
   viewTypeOptions,
   existingFields,
   onClose,
   onCreated,
 }: {
   companyId: number
+  datasetId: string
   viewTypeOptions: string[]
   existingFields: ExistingFieldRef[]
   onClose: () => void
@@ -236,7 +238,7 @@ export function CreateFieldModal({
     void (async () => {
       try {
         const res = await apiGet(
-          `/api/admin/field-metadata/tracking-columns?companyId=${companyId}`
+          `/api/admin/field-metadata/tracking-columns?companyId=${companyId}&datasetId=${encodeURIComponent(datasetId)}`
         )
         const data = (await res.json()) as {
           columns?: TrackingColumnRow[]
@@ -258,7 +260,7 @@ export function CreateFieldModal({
     return () => {
       cancelled = true
     }
-  }, [companyId, fieldKind, storageMode])
+  }, [companyId, datasetId, fieldKind, storageMode])
 
   function onSelectBaseColumn(columnName: string) {
     setSelectedBaseColumn(columnName)
@@ -428,6 +430,7 @@ export function CreateFieldModal({
     try {
       const res = await apiPost("/api/admin/field-metadata", {
         companyId,
+        datasetId,
         fieldName: fn,
         displayName: dn,
         dataType: effectiveDataType,
@@ -465,6 +468,7 @@ export function CreateFieldModal({
       ) {
         for (const opt of createOptions) {
           await apiPost(`/api/admin/field-metadata/${fieldMetadataId}/options`, {
+            datasetId,
             optionValue: opt.value,
             optionLabel: opt.label !== opt.value ? opt.label : null,
             displayOrder: opt.order,

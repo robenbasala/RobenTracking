@@ -38,6 +38,7 @@ import {
 import { loadGridExportRows } from "./lib/pending-tracking/grid-export.js"
 import { mapGridRowWithFieldMetadata } from "./lib/pending-tracking/map-row.js"
 import { saveTrackingItemFieldValues } from "./lib/pending-tracking/save-field-values.js"
+import { getDatasetId } from "./lib/pending-tracking/dataset.js"
 import { parseColumnKeysFromQuery, orderColumnsByKeys } from "./lib/pending-tracking/export-column-order.js"
 import { formatExportCellValue, formatShortDateValue } from "./lib/pending-tracking/export-formatters.js"
 import { streamTrackingGridPdf } from "./lib/pending-tracking/stream-grid-pdf.js"
@@ -48,6 +49,12 @@ import {
   uploadResidentAttachment,
 } from "./lib/blob-storage.js"
 import { executeCensusDaxForResident } from "./lib/census-powerbi.js"
+import {
+  evaluateConditionFormula,
+  evaluateConditionTree,
+  validateConditionTree,
+  type ConditionNode,
+} from "./lib/conditional-formatting.js"
 
 type NavSection =
   | "pending"
@@ -126,8 +133,132 @@ function exportRowStoppedAt(row: Record<string, unknown>): string {
   return formatShortDateValue(row.stoppedAt)
 }
 
+function activeDatasetId(): string {
+  return getDatasetId()
+}
+
+function datasetIdFromRequest(
+  req: Request,
+  body?: Record<string, unknown> | null
+): string {
+  const q = req.query as Record<string, unknown>
+  const fromQuery =
+    typeof q.datasetId === "string" && q.datasetId.trim()
+      ? q.datasetId.trim()
+      : null
+  const fromBody =
+    body && typeof body.datasetId === "string" && body.datasetId.trim()
+      ? body.datasetId.trim()
+      : null
+  return fromQuery ?? fromBody ?? activeDatasetId()
+}
+
+type ConditionalFormattingRuleV2 = {
+  id: string
+  reportKey: string | null
+  targetFieldKey: string | null
+  applyTo: "row" | "field"
+  backgroundColor: string
+  textColor: string | null
+  conditionFormula: string
+  conditionTree: ConditionNode | null
+  isEnabled: boolean
+  sortOrder: number
+}
+
+async function loadConditionalFormattingRules(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  companyId: number,
+  datasetId: string,
+  reportKey: string
+): Promise<ConditionalFormattingRuleV2[]> {
+  await ensureConditionalFormattingRulesTable(pool)
+  const r = pool.request()
+  r.input("companyId", sql.Int, companyId)
+  r.input("datasetId", sql.NVarChar(64), datasetId)
+  r.input("reportKey", sql.NVarChar(200), reportKey)
+  const result = await r.query(`
+    SELECT Id, ReportKey, TargetFieldKey, ApplyTo, BackgroundColor, TextColor, ConditionFormula, ConditionJson, IsEnabled, SortOrder
+    FROM dbo.ConditionalFormattingRules
+    WHERE CompanyId = @companyId
+      AND DatasetId = @datasetId
+      AND IsEnabled = 1
+      AND (
+        ReportKey IS NULL
+        OR ReportKey = N'ALL'
+        OR ReportKey = @reportKey
+      )
+    ORDER BY SortOrder ASC, CreatedAt ASC
+  `)
+  return result.recordset.flatMap((row: Record<string, unknown>) => {
+    try {
+      let tree: ConditionNode | null = null
+      if (row.ConditionJson != null) {
+        tree = JSON.parse(String(row.ConditionJson)) as ConditionNode
+      }
+      return [{
+        id: String(row.Id),
+        reportKey: row.ReportKey == null ? null : String(row.ReportKey),
+        targetFieldKey: row.TargetFieldKey == null ? null : String(row.TargetFieldKey),
+        applyTo: String(row.ApplyTo).toLowerCase() === "field" ? "field" : "row",
+        backgroundColor: String(row.BackgroundColor),
+        textColor: row.TextColor == null ? null : String(row.TextColor),
+        conditionFormula: String(row.ConditionFormula ?? ""),
+        conditionTree: tree,
+        isEnabled: Boolean(row.IsEnabled),
+        sortOrder: Number(row.SortOrder ?? 0),
+      }]
+    } catch {
+      return []
+    }
+  })
+}
+
+function applyConditionalFormattingToRows(
+  rows: Record<string, unknown>[],
+  rules: ConditionalFormattingRuleV2[]
+): Record<string, unknown>[] {
+  if (rules.length === 0) return rows
+  return rows.map((row) => {
+    let rowWinner: { score: number; color: string } | null = null
+    const fieldWinners = new Map<string, { score: number; color: string }>()
+
+    for (const rule of rules) {
+      const matched =
+        rule.conditionFormula.trim()
+          ? evaluateConditionFormula(rule.conditionFormula, row)
+          : rule.conditionTree
+            ? evaluateConditionTree(rule.conditionTree, row)
+            : false
+      if (!matched) continue
+
+      const score = rule.sortOrder + (rule.applyTo === "field" ? 100000 : 0)
+      if (rule.applyTo === "row") {
+        if (!rowWinner || score > rowWinner.score) {
+          rowWinner = { score, color: rule.backgroundColor }
+        }
+      } else {
+        if (!rule.targetFieldKey) continue
+        const prev = fieldWinners.get(rule.targetFieldKey)
+        if (!prev || score > prev.score) {
+          fieldWinners.set(rule.targetFieldKey, { score, color: rule.backgroundColor })
+        }
+      }
+    }
+    if (!rowWinner && fieldWinners.size === 0) return row
+    const fieldColors: Record<string, string> = {}
+    for (const [k, v] of fieldWinners.entries()) fieldColors[k] = v.color
+    return {
+      ...row,
+      ...(rowWinner ? { __rowColor: rowWinner.color } : {}),
+      ...(fieldWinners.size > 0 ? { __fieldColors: fieldColors } : {}),
+    }
+  })
+}
+
 export async function getTrackingItems(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const section = (req.query.section ?? "pending") as NavSection
     const selectedViewType = viewTypeMap[section] ?? "Pending"
     const companyIdRaw =
@@ -143,6 +274,7 @@ export async function getTrackingItems(req: Request, res: Response) {
     requestDb.input("facilityName", sql.VarChar(200), facilityName)
     requestDb.input("section", sql.VarChar(20), section)
     requestDb.input("companyId", sql.Int, Number.isFinite(companyId) ? companyId : null)
+    requestDb.input("datasetId", sql.NVarChar(64), datasetId)
 
     const result = await requestDb.query(`
       SELECT
@@ -167,6 +299,7 @@ export async function getTrackingItems(req: Request, res: Response) {
         AND ViewType = @viewType
         AND FacilityName = @facilityName
         AND (@companyId IS NULL OR CompanyId = @companyId)
+        AND DatasetId = @datasetId
       ORDER BY ISNULL(UpdatedAt, CreatedAt) DESC
     `)
 
@@ -180,6 +313,7 @@ export async function getTrackingItems(req: Request, res: Response) {
 
 export async function getHotCases(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -204,6 +338,7 @@ export async function getHotCases(req: Request, res: Response) {
     }
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("facilityIdList", sql.NVarChar(sql.MAX), facilityIdList)
     const result = await r.query(`
       SELECT TOP 500
@@ -217,6 +352,7 @@ export async function getHotCases(req: Request, res: Response) {
       FROM dbo.TrackingItemsTbl ti
       WHERE ti.IsActive = 1
         AND ti.CompanyId = @companyId
+        AND ti.DatasetId = @datasetId
         AND ISNULL(ti.IsHotCase, 0) = 1
         ${SQL_FILTER_FACILITY_LIST_TI}
       ORDER BY ISNULL(ti.UpdatedAt, ti.CreatedAt) DESC
@@ -245,6 +381,7 @@ export async function getHotCases(req: Request, res: Response) {
 
 export async function getTasks(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = Number(
       req.query.companyId ??
         process.env.TRACKING_DEFAULT_COMPANY_ID ??
@@ -272,6 +409,7 @@ export async function getTasks(req: Request, res: Response) {
         : "DESC"
     const whereClause = `
       WHERE t.CompanyId = @companyId
+        AND t.DatasetId = @datasetId
         AND (@status IS NULL OR t.Status = @status)
         AND (@assignee IS NULL OR t.Assignee LIKE N'%' + @assignee + N'%')
         AND (@search IS NULL OR t.Title LIKE N'%' + @search + N'%')
@@ -280,6 +418,7 @@ export async function getTasks(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const facReq = pool.request()
     facReq.input("companyId", sql.Int, companyId)
+    facReq.input("datasetId", sql.NVarChar(64), datasetId)
     const facResult = await facReq.query(`
       SELECT DISTINCT p.FacilityName
       FROM dbo.ResidentTask t
@@ -287,6 +426,7 @@ export async function getTasks(req: Request, res: Response) {
         ON t.TrackingItemId = p.TrackingItemId
         AND p.CompanyId = t.CompanyId
       WHERE t.CompanyId = @companyId
+        AND t.DatasetId = @datasetId
         AND p.FacilityName IS NOT NULL
         AND p.FacilityName <> N''
       ORDER BY p.FacilityName
@@ -296,6 +436,7 @@ export async function getTasks(req: Request, res: Response) {
     )
     const rq = pool.request()
     rq.input("companyId", sql.Int, companyId)
+    rq.input("datasetId", sql.NVarChar(64), datasetId)
     rq.input("status", sql.NVarChar(50), statusFilter)
     rq.input("assignee", sql.NVarChar(256), assigneeFilter)
     rq.input("search", sql.NVarChar(256), searchFilter)
@@ -313,6 +454,7 @@ export async function getTasks(req: Request, res: Response) {
     const totalCount = countResult.recordset[0]?.TotalCount ?? 0
     const rq2 = pool.request()
     rq2.input("companyId", sql.Int, companyId)
+    rq2.input("datasetId", sql.NVarChar(64), datasetId)
     rq2.input("status", sql.NVarChar(50), statusFilter)
     rq2.input("assignee", sql.NVarChar(256), assigneeFilter)
     rq2.input("search", sql.NVarChar(256), searchFilter)
@@ -451,6 +593,7 @@ export async function getFacilities(req: Request, res: Response) {
 
 export async function getFields(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -473,6 +616,7 @@ export async function getFields(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const fields = await loadFieldMetadataForScreen(pool, {
       companyId,
+      datasetId,
       payerType,
       state,
       screenLocation,
@@ -502,6 +646,7 @@ export async function getFields(req: Request, res: Response) {
 
 export async function getGrid(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -524,6 +669,7 @@ export async function getGrid(req: Request, res: Response) {
     const state = stateRaw.length >= 2 ? stateRaw.slice(0, 2).toUpperCase() : null
     const params: GridQueryParams = {
       companyId,
+      datasetId,
       viewType: viewTypeRaw,
       state,
       search: (req.query.search as string) ?? null,
@@ -547,6 +693,7 @@ export async function getGrid(req: Request, res: Response) {
     const fields = await loadGridFieldMetadata(
       pool,
       companyId,
+      datasetId,
       viewTypeRaw,
       state
     )
@@ -570,7 +717,11 @@ export async function getGrid(req: Request, res: Response) {
       .filter((c) => c.type === "dropdown")
       .map((c) => c.fieldMetadataId)
     if (dropdownColIds.length > 0) {
-      const optionsMap = await fetchDropdownOptionsForFields(pool, dropdownColIds)
+      const optionsMap = await fetchDropdownOptionsForFields(
+        pool,
+        datasetId,
+        dropdownColIds
+      )
       for (const col of columns) {
         if (col.type === "dropdown") {
           col.dropdownOptions = optionsMap.get(col.fieldMetadataId) ?? []
@@ -622,6 +773,13 @@ export async function getGrid(req: Request, res: Response) {
         mapGridRowWithFieldMetadata(r, fields)
       )
     }
+    const formattingRules = await loadConditionalFormattingRules(
+      pool,
+      companyId,
+      datasetId,
+      viewTypeRaw
+    )
+    rows = applyConditionalFormattingToRows(rows, formattingRules)
     res.json({
       columns,
       rows,
@@ -629,6 +787,18 @@ export async function getGrid(req: Request, res: Response) {
       page: params.page,
       pageSize: params.pageSize,
       defaultSortKey,
+      formattingRules: formattingRules.map((r) => ({
+        id: r.id,
+        reportKey: r.reportKey,
+        targetFieldKey: r.targetFieldKey,
+        applyTo: r.applyTo,
+        backgroundColor: r.backgroundColor,
+        textColor: r.textColor,
+        conditionFormula: r.conditionFormula,
+        conditionTree: r.conditionTree,
+        isEnabled: r.isEnabled,
+        sortOrder: r.sortOrder,
+      })),
     } satisfies PendingTrackingGridResponse)
   } catch (error) {
     const message =
@@ -647,6 +817,7 @@ export async function getGrid(req: Request, res: Response) {
 
 export async function getExport(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -667,6 +838,7 @@ export async function getExport(req: Request, res: Response) {
     const state = stateRaw.length >= 2 ? stateRaw.slice(0, 2).toUpperCase() : null
     const params: GridQueryParams = {
       companyId,
+      datasetId,
       viewType: viewTypeRaw,
       state,
       search: (req.query.search as string) ?? null,
@@ -748,6 +920,7 @@ export async function getExport(req: Request, res: Response) {
 
 export async function getExportPdf(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -768,6 +941,7 @@ export async function getExportPdf(req: Request, res: Response) {
     const state = stateRaw.length >= 2 ? stateRaw.slice(0, 2).toUpperCase() : null
     const params: GridQueryParams = {
       companyId,
+      datasetId,
       viewType: viewTypeRaw,
       state,
       search: (req.query.search as string) ?? null,
@@ -835,6 +1009,7 @@ export async function getExportPdf(req: Request, res: Response) {
 
 export async function getPendingDetail(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -843,7 +1018,7 @@ export async function getPendingDetail(req: Request, res: Response) {
     const stateRaw = (req.query.state as string)?.trim() ?? ""
     const state = stateRaw.length >= 2 ? stateRaw.slice(0, 2).toUpperCase() : null
     const pool = await getTrackingPool()
-    const body = await buildDetailResponse(pool, trackingItemId, state)
+    const body = await buildDetailResponse(pool, trackingItemId, datasetId, state)
     if (!body) {
       res.status(404).json({ error: "Not found" })
       return
@@ -858,6 +1033,7 @@ export async function getPendingDetail(req: Request, res: Response) {
 
 export async function deletePendingItem(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -880,13 +1056,14 @@ export async function deletePendingItem(req: Request, res: Response) {
       const upd = new sql.Request(transaction)
       upd.input("trackingItemId", sql.Int, trackingItemId)
       upd.input("companyId", sql.Int, companyId)
+      upd.input("datasetId", sql.NVarChar(64), datasetId)
       upd.input("stoppedBy", sql.NVarChar(256), stoppedBy)
       const updResult = await upd.query(`
         UPDATE dbo.TrackingItemsTbl
         SET IsActive = 0,
             StoppedAt = SYSUTCDATETIME(),
             StoppedBy = @stoppedBy
-        WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
+        WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
       `)
       const n = updResult.rowsAffected?.[0] ?? 0
       if (!n) {
@@ -897,10 +1074,11 @@ export async function deletePendingItem(req: Request, res: Response) {
       const ins = new sql.Request(transaction)
       ins.input("trackingItemId", sql.Int, trackingItemId)
       ins.input("companyId", sql.Int, companyId)
+      ins.input("datasetId", sql.NVarChar(64), datasetId)
       ins.input("stoppedBy", sql.NVarChar(256), stoppedBy)
       await ins.query(`
-        INSERT INTO dbo.TrackingItemStopAudit (TrackingItemId, CompanyId, StoppedBy)
-        VALUES (@trackingItemId, @companyId, @stoppedBy)
+        INSERT INTO dbo.TrackingItemStopAudit (TrackingItemId, CompanyId, DatasetId, StoppedBy)
+        VALUES (@trackingItemId, @companyId, @datasetId, @stoppedBy)
       `)
       await transaction.commit()
     } catch (e) {
@@ -921,6 +1099,7 @@ const putValuesSchema = z.object({
 
 export async function putPendingValues(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -933,7 +1112,7 @@ export async function putPendingValues(req: Request, res: Response) {
     }
     const values = parsed.data.values ?? {}
     const pool = await getTrackingPool()
-    const baseRow = await fetchTrackingItemBase(pool, trackingItemId)
+    const baseRow = await fetchTrackingItemBase(pool, trackingItemId, datasetId)
     if (!baseRow) {
       res.status(404).json({ error: "Not found" })
       return
@@ -947,6 +1126,7 @@ export async function putPendingValues(req: Request, res: Response) {
       pool,
       trackingItemId,
       companyId,
+      datasetId,
       values
     )
     res.json({ ok: true, ...result })
@@ -964,6 +1144,7 @@ const hotCaseSchema = z.object({
 
 export async function patchHotCase(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const parsed = hotCaseSchema.safeParse(req.body)
     if (!parsed.success || !Number.isFinite(trackingItemId)) {
@@ -981,12 +1162,14 @@ export async function patchHotCase(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("isHotCase", sql.Bit, parsed.data.isHotCase ? 1 : 0)
     await r.query(`
       UPDATE dbo.TrackingItemsTbl
       SET IsHotCase = @isHotCase
       WHERE TrackingItemId = @trackingItemId
         AND CompanyId = @companyId
+        AND DatasetId = @datasetId
     `)
     res.json({ ok: true, isHotCase: parsed.data.isHotCase })
   } catch (e) {
@@ -999,6 +1182,7 @@ export async function patchHotCase(req: Request, res: Response) {
 
 export async function getNotes(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const companyId = numParam(
       req.query as Record<string, unknown>,
@@ -1013,6 +1197,7 @@ export async function getNotes(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       SELECT NoteId, NoteType, Body, CreatedAt, CreatedBy,
         CAST(ISNULL(IsPinned, 0) AS BIT) AS IsPinned,
@@ -1020,6 +1205,7 @@ export async function getNotes(req: Request, res: Response) {
       FROM dbo.ResidentNote
       WHERE TrackingItemId = @trackingItemId
         AND CompanyId = @companyId
+        AND DatasetId = @datasetId
         AND ISNULL(Body, '') <> '__SOFT_DELETED__'
       ORDER BY CASE WHEN ISNULL(IsPinned, 0) = 1 THEN 0 ELSE 1 END, CreatedAt DESC
     `)
@@ -1052,6 +1238,7 @@ const postNoteSchema = z.object({
 
 export async function postNote(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -1071,15 +1258,16 @@ export async function postNote(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, parsed.data.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("noteType", sql.NVarChar(50), noteType)
     r.input("body", sql.NVarChar(sql.MAX), parsed.data.body.trim())
     r.input("createdBy", sql.NVarChar(256), "system")
     r.input("isPinned", sql.Bit, isPinned)
     r.input("isHighlighted", sql.Bit, isHighlighted)
     const result = await r.query<{ NoteId: number }>(`
-      INSERT INTO dbo.ResidentNote (TrackingItemId, CompanyId, NoteType, Body, CreatedBy, IsPinned, IsHighlighted)
+      INSERT INTO dbo.ResidentNote (TrackingItemId, CompanyId, DatasetId, NoteType, Body, CreatedBy, IsPinned, IsHighlighted)
       OUTPUT INSERTED.NoteId
-      VALUES (@trackingItemId, @companyId, @noteType, @body, @createdBy, @isPinned, @isHighlighted)
+      VALUES (@trackingItemId, @companyId, @datasetId, @noteType, @body, @createdBy, @isPinned, @isHighlighted)
     `)
     const noteId = Number(result.recordset[0]?.NoteId)
     res.json({ ok: true, noteId })
@@ -1091,6 +1279,7 @@ export async function postNote(req: Request, res: Response) {
 
 export async function patchNote(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const noteId = Number(req.params.noteId)
     const json = req.body as {
@@ -1117,6 +1306,7 @@ export async function patchNote(req: Request, res: Response) {
     r.input("noteId", sql.Int, noteId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     if (json.body != null) {
       sets.push("Body = @body")
       r.input("body", sql.NVarChar(sql.MAX), json.body)
@@ -1144,7 +1334,7 @@ export async function patchNote(req: Request, res: Response) {
     await r.query(`
       UPDATE dbo.ResidentNote
       SET ${sets.join(", ")}
-      WHERE NoteId = @noteId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE NoteId = @noteId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
@@ -1156,6 +1346,7 @@ export async function patchNote(req: Request, res: Response) {
 
 export async function deleteNote(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const noteId = Number(req.params.noteId)
     const companyId = numParam(
@@ -1176,12 +1367,13 @@ export async function deleteNote(req: Request, res: Response) {
     r.input("noteId", sql.Int, noteId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     await r.query(`
       UPDATE dbo.ResidentNote
       SET Body = '__SOFT_DELETED__',
           IsPinned = 0,
           IsHighlighted = 0
-      WHERE NoteId = @noteId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE NoteId = @noteId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
@@ -1192,6 +1384,7 @@ export async function deleteNote(req: Request, res: Response) {
 
 export async function getEmails(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const companyId = numParam(
       req.query as Record<string, unknown>,
@@ -1206,6 +1399,7 @@ export async function getEmails(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const colCheck = await pool.request().query(`
       SELECT name FROM sys.columns
       WHERE object_id = OBJECT_ID(N'dbo.ResidentEmail') AND name IN (N'Body', N'CcEmails')
@@ -1218,7 +1412,7 @@ export async function getEmails(req: Request, res: Response) {
     const result = await r.query(`
       SELECT EmailId, Subject${bodyCol}, RecipientEmail, RecipientName${ccCol}, SentAt, SentBy, Status, ExternalMessageId
       FROM dbo.ResidentEmail
-      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
       ORDER BY SentAt DESC
     `)
     const emails = result.recordset.map((row: Record<string, unknown>) => ({
@@ -1256,6 +1450,7 @@ const postEmailSchema = z.object({
 
 export async function postEmail(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -1282,6 +1477,7 @@ export async function postEmail(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, parsed.data.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("subject", sql.NVarChar(500), parsed.data.subject.trim())
     r.input("recipientEmail", sql.NVarChar(500), parsed.data.recipientEmail.trim())
     r.input("recipientName", sql.NVarChar(256), parsed.data.recipientName ?? null)
@@ -1291,6 +1487,7 @@ export async function postEmail(req: Request, res: Response) {
     const insertCols = [
       "TrackingItemId",
       "CompanyId",
+      "DatasetId",
       "Subject",
       "RecipientEmail",
       "RecipientName",
@@ -1301,6 +1498,7 @@ export async function postEmail(req: Request, res: Response) {
     const insertVals = [
       "@trackingItemId",
       "@companyId",
+      "@datasetId",
       "@subject",
       "@recipientEmail",
       "@recipientName",
@@ -1333,6 +1531,7 @@ export async function postEmail(req: Request, res: Response) {
 
 export async function getResidentTasks(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const companyId = numParam(
       req.query as Record<string, unknown>,
@@ -1347,10 +1546,11 @@ export async function getResidentTasks(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       SELECT TaskId, Title, DueDate, Status, Assignee, Notes, CreatedAt, CreatedBy
       FROM dbo.ResidentTask
-      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
       ORDER BY CreatedAt DESC
     `)
     const tasks = result.recordset.map((row: Record<string, unknown>) => ({
@@ -1391,6 +1591,7 @@ const postTaskSchema = z.object({
 
 export async function postResidentTask(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -1410,6 +1611,7 @@ export async function postResidentTask(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, parsed.data.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("title", sql.NVarChar(256), parsed.data.title.trim())
     r.input("dueDate", sql.Date, dueDateVal)
     r.input("status", sql.NVarChar(50), status)
@@ -1417,9 +1619,9 @@ export async function postResidentTask(req: Request, res: Response) {
     r.input("notes", sql.NVarChar(sql.MAX), parsed.data.notes ?? null)
     r.input("createdBy", sql.NVarChar(256), "system")
     const result = await r.query<{ TaskId: number }>(`
-      INSERT INTO dbo.ResidentTask (TrackingItemId, CompanyId, Title, DueDate, Status, Assignee, Notes, CreatedBy)
+      INSERT INTO dbo.ResidentTask (TrackingItemId, CompanyId, DatasetId, Title, DueDate, Status, Assignee, Notes, CreatedBy)
       OUTPUT INSERTED.TaskId
-      VALUES (@trackingItemId, @companyId, @title, @dueDate, @status, @assignee, @notes, @createdBy)
+      VALUES (@trackingItemId, @companyId, @datasetId, @title, @dueDate, @status, @assignee, @notes, @createdBy)
     `)
     const taskId = Number(result.recordset[0]?.TaskId)
     res.json({ ok: true, taskId })
@@ -1431,6 +1633,7 @@ export async function postResidentTask(req: Request, res: Response) {
 
 export async function patchResidentTask(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const taskId = Number(req.params.taskId)
     const body = req.body as {
@@ -1455,6 +1658,7 @@ export async function patchResidentTask(req: Request, res: Response) {
     r.input("taskId", sql.Int, taskId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const sets: string[] = ["UpdatedAt = SYSUTCDATETIME()"]
     if (body.title !== undefined) {
       r.input("title", sql.NVarChar(256), body.title.trim())
@@ -1480,7 +1684,7 @@ export async function patchResidentTask(req: Request, res: Response) {
     }
     await r.query(`
       UPDATE dbo.ResidentTask SET ${sets.join(", ")}
-      WHERE TaskId = @taskId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE TaskId = @taskId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
@@ -1491,6 +1695,7 @@ export async function patchResidentTask(req: Request, res: Response) {
 
 export async function deleteResidentTask(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const taskId = Number(req.params.taskId)
     const companyId = numParam(
@@ -1511,9 +1716,10 @@ export async function deleteResidentTask(req: Request, res: Response) {
     r.input("taskId", sql.Int, taskId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     await r.query(`
       DELETE FROM dbo.ResidentTask
-      WHERE TaskId = @taskId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId
+      WHERE TaskId = @taskId AND TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
@@ -1524,6 +1730,7 @@ export async function deleteResidentTask(req: Request, res: Response) {
 
 export async function getAttachments(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const companyId = numParam(
       req.query as Record<string, unknown>,
@@ -1538,11 +1745,12 @@ export async function getAttachments(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       SELECT AttachmentId, FileName, ContentType, FileSizeBytes, BlobUrl,
              BlobContainer, BlobName, UniqueId, ResidentId, UploadedAt, UploadedBy, Description
       FROM dbo.ResidentAttachment
-      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND IsDeleted = 0
+      WHERE TrackingItemId = @trackingItemId AND CompanyId = @companyId AND DatasetId = @datasetId AND IsDeleted = 0
       ORDER BY UploadedAt DESC
     `)
     const attachments = result.recordset.map((row: Record<string, unknown>) => ({
@@ -1629,6 +1837,7 @@ async function resolveAttachmentIds(
 
 export async function postAttachment(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -1651,6 +1860,7 @@ export async function postAttachment(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, parsed.data.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("fileName", sql.NVarChar(500), parsed.data.fileName.trim())
     r.input("contentType", sql.NVarChar(200), parsed.data.contentType?.trim() ?? "application/octet-stream")
     r.input("fileSizeBytes", sql.BigInt, parsed.data.fileSizeBytes ?? null)
@@ -1663,11 +1873,11 @@ export async function postAttachment(req: Request, res: Response) {
     r.input("description", sql.NVarChar(1000), parsed.data.description ?? null)
     const result = await r.query<{ AttachmentId: number }>(`
       INSERT INTO dbo.ResidentAttachment
-        (TrackingItemId, CompanyId, FileName, ContentType, FileSizeBytes,
+        (TrackingItemId, CompanyId, DatasetId, FileName, ContentType, FileSizeBytes,
          BlobUrl, BlobContainer, BlobName, UniqueId, ResidentId, UploadedBy, Description)
       OUTPUT INSERTED.AttachmentId
       VALUES
-        (@trackingItemId, @companyId, @fileName, @contentType, @fileSizeBytes,
+        (@trackingItemId, @companyId, @datasetId, @fileName, @contentType, @fileSizeBytes,
          @blobUrl, @blobContainer, @blobName, @uniqueId, @residentId, @uploadedBy, @description)
     `)
     const attachmentId = Number(result.recordset[0]?.AttachmentId)
@@ -1681,6 +1891,7 @@ export async function postAttachment(req: Request, res: Response) {
 
 export async function postAttachmentUpload(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     if (!Number.isFinite(trackingItemId)) {
       res.status(400).json({ error: "Invalid trackingItemId" })
@@ -1727,6 +1938,7 @@ export async function postAttachmentUpload(req: Request, res: Response) {
     const r = pool.request()
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("fileName", sql.NVarChar(500), file.originalname.trim().slice(0, 500))
     r.input("contentType", sql.NVarChar(200), (file.mimetype || "application/octet-stream").slice(0, 200))
     r.input("fileSizeBytes", sql.BigInt, file.size)
@@ -1739,11 +1951,11 @@ export async function postAttachmentUpload(req: Request, res: Response) {
     r.input("description", sql.NVarChar(1000), description)
     const result = await r.query<{ AttachmentId: number }>(`
       INSERT INTO dbo.ResidentAttachment
-        (TrackingItemId, CompanyId, FileName, ContentType, FileSizeBytes,
+        (TrackingItemId, CompanyId, DatasetId, FileName, ContentType, FileSizeBytes,
          BlobUrl, BlobContainer, BlobName, UniqueId, ResidentId, UploadedBy, Description)
       OUTPUT INSERTED.AttachmentId
       VALUES
-        (@trackingItemId, @companyId, @fileName, @contentType, @fileSizeBytes,
+        (@trackingItemId, @companyId, @datasetId, @fileName, @contentType, @fileSizeBytes,
          @blobUrl, @blobContainer, @blobName, @uniqueId, @residentId, @uploadedBy, @description)
     `)
     const attachmentId = Number(result.recordset[0]?.AttachmentId)
@@ -1757,6 +1969,7 @@ export async function postAttachmentUpload(req: Request, res: Response) {
 
 export async function getAttachmentDownload(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const attachmentId = Number(req.params.attachmentId)
     const companyId = numParam(
@@ -1777,6 +1990,7 @@ export async function getAttachmentDownload(req: Request, res: Response) {
     r.input("attachmentId", sql.Int, attachmentId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query<{
       BlobContainer: string
       BlobName: string
@@ -1787,6 +2001,7 @@ export async function getAttachmentDownload(req: Request, res: Response) {
       WHERE AttachmentId = @attachmentId
         AND TrackingItemId = @trackingItemId
         AND CompanyId = @companyId
+        AND DatasetId = @datasetId
         AND IsDeleted = 0
     `)
     const row = result.recordset[0]
@@ -1805,6 +2020,7 @@ export async function getAttachmentDownload(req: Request, res: Response) {
 
 export async function deleteAttachment(req: Request, res: Response) {
   try {
+    const datasetId = activeDatasetId()
     const trackingItemId = Number(req.params.trackingItemId)
     const attachmentId = Number(req.params.attachmentId)
     const companyId = numParam(
@@ -1825,11 +2041,13 @@ export async function deleteAttachment(req: Request, res: Response) {
     r.input("attachmentId", sql.Int, attachmentId)
     r.input("trackingItemId", sql.Int, trackingItemId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     await r.query(`
       UPDATE dbo.ResidentAttachment SET IsDeleted = 1
       WHERE AttachmentId = @attachmentId
         AND TrackingItemId = @trackingItemId
         AND CompanyId = @companyId
+        AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
@@ -1841,42 +2059,48 @@ export async function deleteAttachment(req: Request, res: Response) {
 
 async function replacePayerTypes(
   pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  datasetId: string,
   fieldMetadataId: number,
   payerTypes: string[]
 ): Promise<void> {
   const r = pool.request()
   r.input("id", sql.Int, fieldMetadataId)
+  r.input("datasetId", sql.NVarChar(64), datasetId)
   await r.query(
-    `DELETE FROM dbo.FieldMetadataPayerType WHERE FieldMetadataId = @id`
+    `DELETE FROM dbo.FieldMetadataPayerType WHERE FieldMetadataId = @id AND DatasetId = @datasetId`
   )
   for (const pt of payerTypes) {
     const t = pt.trim()
     if (!t) continue
     const ins = pool.request()
     ins.input("id", sql.Int, fieldMetadataId)
+    ins.input("datasetId", sql.NVarChar(64), datasetId)
     ins.input("pt", sql.NVarChar(100), t)
     await ins.query(`
-      INSERT INTO dbo.FieldMetadataPayerType (FieldMetadataId, PayerType) VALUES (@id, @pt)
+      INSERT INTO dbo.FieldMetadataPayerType (FieldMetadataId, DatasetId, PayerType) VALUES (@id, @datasetId, @pt)
     `)
   }
 }
 
 async function replaceStates(
   pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  datasetId: string,
   fieldMetadataId: number,
   states: string[]
 ): Promise<void> {
   const r = pool.request()
   r.input("id", sql.Int, fieldMetadataId)
-  await r.query(`DELETE FROM dbo.FieldMetadataState WHERE FieldMetadataId = @id`)
+  r.input("datasetId", sql.NVarChar(64), datasetId)
+  await r.query(`DELETE FROM dbo.FieldMetadataState WHERE FieldMetadataId = @id AND DatasetId = @datasetId`)
   for (const s of states) {
     const st = s.trim().toUpperCase().slice(0, 2)
     if (st.length !== 2) continue
     const ins = pool.request()
     ins.input("id", sql.Int, fieldMetadataId)
+    ins.input("datasetId", sql.NVarChar(64), datasetId)
     ins.input("st", sql.Char(2), st)
     await ins.query(`
-      INSERT INTO dbo.FieldMetadataState (FieldMetadataId, State) VALUES (@id, @st)
+      INSERT INTO dbo.FieldMetadataState (FieldMetadataId, DatasetId, State) VALUES (@id, @datasetId, @st)
     `)
   }
 }
@@ -1982,6 +2206,7 @@ async function assertTrackingItemColumnExists(
 
 async function upsertFieldMetadataViewOrders(
   pool: Awaited<ReturnType<typeof getTrackingPool>>,
+  datasetId: string,
   fieldMetadataId: number,
   rows: { viewType: string; displayOrder: number }[]
 ): Promise<void> {
@@ -1994,23 +2219,25 @@ async function upsertFieldMetadataViewOrders(
       ? Math.trunc(row.displayOrder)
       : 0
     const ins = pool.request()
+    ins.input("datasetId", sql.NVarChar(64), datasetId)
     ins.input("fid", sql.Int, fieldMetadataId)
     ins.input("vt", sql.NVarChar(100), vt)
     ins.input("ord", sql.Int, ord)
     await ins.query(`
       MERGE dbo.FieldMetadataViewOrder AS t
-      USING (SELECT @fid AS FieldMetadataId, @vt AS ViewType) AS s
-      ON t.FieldMetadataId = s.FieldMetadataId AND t.ViewType = s.ViewType
+      USING (SELECT @fid AS FieldMetadataId, @vt AS ViewType, @datasetId AS DatasetId) AS s
+      ON t.FieldMetadataId = s.FieldMetadataId AND t.ViewType = s.ViewType AND t.DatasetId = s.DatasetId
       WHEN MATCHED THEN UPDATE SET DisplayOrder = @ord
       WHEN NOT MATCHED THEN
-        INSERT (FieldMetadataId, ViewType, DisplayOrder)
-        VALUES (@fid, @vt, @ord);
+        INSERT (FieldMetadataId, DatasetId, ViewType, DisplayOrder)
+        VALUES (@fid, @datasetId, @vt, @ord);
     `)
   }
 }
 
 export async function getAdminTrackingItemColumns(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const companyId = Number(
       req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
     )
@@ -2030,8 +2257,9 @@ export async function getAdminTrackingItemColumns(req: Request, res: Response) {
       ORDER BY c.ORDINAL_POSITION
     `)
     const fm = await pool.request().input("companyId", sql.Int, companyId)
+      .input("datasetId", sql.NVarChar(64), datasetId)
       .query<{ FieldName: string }>(`
-      SELECT FieldName FROM dbo.FieldMetadata WHERE CompanyId = @companyId
+      SELECT FieldName FROM dbo.FieldMetadata WHERE CompanyId = @companyId AND DatasetId = @datasetId
     `)
     const used = new Set(
       fm.recordset.map((r) => String(r.FieldName).trim().toLowerCase())
@@ -2055,6 +2283,7 @@ export async function getAdminTrackingItemColumns(req: Request, res: Response) {
 
 export async function getAdminFieldMetadata(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const companyId = Number(
       req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
     )
@@ -2071,21 +2300,24 @@ export async function getAdminFieldMetadata(req: Request, res: Response) {
       : ", N'regular' AS FieldKind, CAST(NULL AS nvarchar(max)) AS FormulaDefinitionJson"
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const fmResult = await r.query(`
       SELECT
         FieldMetadataId, CompanyId, FieldName, DisplayName, DataType, ScreenLocation,
         DisplayOrder, IsActive, IsRequired, IsEditable, IsSystemField, SourceType,
         SourceColumnName${msiCol}${ffCol}
       FROM dbo.FieldMetadata
-      WHERE CompanyId = @companyId
+      WHERE CompanyId = @companyId AND DatasetId = @datasetId
       ORDER BY ScreenLocation, DisplayOrder, FieldMetadataId
     `)
     const vtReq = pool.request()
     vtReq.input("companyId", sql.Int, companyId)
+    vtReq.input("datasetId", sql.NVarChar(64), datasetId)
     const vtCompany = await vtReq.query<{ ViewType: string }>(`
       SELECT DISTINCT LTRIM(RTRIM(ti.ViewType)) AS ViewType
       FROM dbo.TrackingItemsTbl ti
       WHERE ti.CompanyId = @companyId
+        AND ti.DatasetId = @datasetId
         AND ti.IsActive = 1
         AND ti.ViewType IS NOT NULL
         AND LTRIM(RTRIM(ti.ViewType)) <> N''
@@ -2098,10 +2330,11 @@ export async function getAdminFieldMetadata(req: Request, res: Response) {
     if (ids.length > 0) {
       const placeholders = ids.map((_, i) => `@id${i}`).join(", ")
       const r2 = pool.request()
+      r2.input("datasetId", sql.NVarChar(64), datasetId)
       ids.forEach((id, i) => r2.input(`id${i}`, sql.Int, id))
       const pt = await r2.query<{ FieldMetadataId: number; PayerType: string }>(`
         SELECT FieldMetadataId, PayerType FROM dbo.FieldMetadataPayerType
-        WHERE FieldMetadataId IN (${placeholders})
+        WHERE FieldMetadataId IN (${placeholders}) AND DatasetId = @datasetId
       `)
       for (const row of pt.recordset) {
         const list = viewTypeMap.get(row.FieldMetadataId) ?? []
@@ -2109,10 +2342,11 @@ export async function getAdminFieldMetadata(req: Request, res: Response) {
         viewTypeMap.set(row.FieldMetadataId, list)
       }
       const r3 = pool.request()
+      r3.input("datasetId", sql.NVarChar(64), datasetId)
       ids.forEach((id, i) => r3.input(`id${i}`, sql.Int, id))
       const st = await r3.query<{ FieldMetadataId: number; State: string }>(`
         SELECT FieldMetadataId, State FROM dbo.FieldMetadataState
-        WHERE FieldMetadataId IN (${placeholders})
+        WHERE FieldMetadataId IN (${placeholders}) AND DatasetId = @datasetId
       `)
       for (const row of st.recordset) {
         const list = stateMap.get(row.FieldMetadataId) ?? []
@@ -2124,11 +2358,12 @@ export async function getAdminFieldMetadata(req: Request, res: Response) {
     if (ids.length > 0) {
       const placeholdersVc = ids.map((_, i) => `@vc${i}`).join(", ")
       const rVc = pool.request()
+      rVc.input("datasetId", sql.NVarChar(64), datasetId)
       ids.forEach((id, i) => rVc.input(`vc${i}`, sql.Int, id))
       const vcRows = await rVc.query<{ FieldMetadataId: number; Cnt: number }>(`
         SELECT FieldMetadataId, COUNT(*) AS Cnt
         FROM dbo.TrackingItemFieldValues
-        WHERE FieldMetadataId IN (${placeholdersVc})
+        WHERE FieldMetadataId IN (${placeholdersVc}) AND DatasetId = @datasetId
         GROUP BY FieldMetadataId
       `)
       for (const row of vcRows.recordset) {
@@ -2223,6 +2458,7 @@ const postFieldMetaSchema = z.object({
 
 export async function postAdminFieldMetadata(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const parsed = postFieldMetaSchema.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: "companyId, fieldName, displayName required" })
@@ -2282,10 +2518,11 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
 
     const dupReq = pool.request()
     dupReq.input("companyId", sql.Int, body.companyId)
+    dupReq.input("datasetId", sql.NVarChar(64), datasetId)
     dupReq.input("fn", sql.NVarChar(128), fieldNameFinal)
     const dup = await dupReq.query(`
       SELECT 1 AS x FROM dbo.FieldMetadata
-      WHERE CompanyId = @companyId AND FieldName = @fn
+      WHERE CompanyId = @companyId AND DatasetId = @datasetId AND FieldName = @fn
     `)
     if (dup.recordset.length > 0) {
       res.status(400).json({
@@ -2316,6 +2553,7 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
 
     const r = pool.request()
     r.input("companyId", sql.Int, body.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("fieldName", sql.NVarChar(128), fieldNameFinal)
     r.input("displayName", sql.NVarChar(256), body.displayName.trim())
     r.input("dataType", sql.NVarChar(50), dataTypeOut)
@@ -2342,13 +2580,13 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
       r.input("formulaJson", sql.NVarChar(sql.MAX), formulaJson)
       insertResult = await r.query<{ FieldMetadataId: number }>(`
         INSERT INTO dbo.FieldMetadata (
-          CompanyId, FieldName, DisplayName, DataType, ScreenLocation, DisplayOrder,
+          CompanyId, DatasetId, FieldName, DisplayName, DataType, ScreenLocation, DisplayOrder,
           IsActive, IsRequired, IsEditable, IsSystemField, SourceType, SourceColumnName,
           FieldKind, FormulaDefinitionJson
         )
         OUTPUT INSERTED.FieldMetadataId
         VALUES (
-          @companyId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
+          @companyId, @datasetId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
           @isActive, @isRequired, @isEditable, @isSystemField, @sourceType, @sourceColumnName,
           @fieldKind, @formulaJson
         )
@@ -2356,12 +2594,12 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
     } else {
       insertResult = await r.query<{ FieldMetadataId: number }>(`
         INSERT INTO dbo.FieldMetadata (
-          CompanyId, FieldName, DisplayName, DataType, ScreenLocation, DisplayOrder,
+          CompanyId, DatasetId, FieldName, DisplayName, DataType, ScreenLocation, DisplayOrder,
           IsActive, IsRequired, IsEditable, IsSystemField, SourceType, SourceColumnName
         )
         OUTPUT INSERTED.FieldMetadataId
         VALUES (
-          @companyId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
+          @companyId, @datasetId, @fieldName, @displayName, @dataType, @screenLocation, @displayOrder,
           @isActive, @isRequired, @isEditable, @isSystemField, @sourceType, @sourceColumnName
         )
       `)
@@ -2372,9 +2610,9 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
       return
     }
     const vt = body.viewTypes ?? body.payerTypes ?? []
-    await replacePayerTypes(pool, fieldMetadataId, vt)
-    await replaceStates(pool, fieldMetadataId, body.states ?? [])
-    await upsertFieldMetadataViewOrders(pool, fieldMetadataId, body.viewOrders ?? [])
+    await replacePayerTypes(pool, datasetId, fieldMetadataId, vt)
+    await replaceStates(pool, datasetId, fieldMetadataId, body.states ?? [])
+    await upsertFieldMetadataViewOrders(pool, datasetId, fieldMetadataId, body.viewOrders ?? [])
     res.json({ ok: true, fieldMetadataId })
   } catch (error) {
     const message =
@@ -2385,6 +2623,7 @@ export async function postAdminFieldMetadata(req: Request, res: Response) {
 
 export async function patchAdminFieldMetadata(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     if (!Number.isFinite(fieldMetadataId)) {
       res.status(400).json({ error: "Invalid id" })
@@ -2413,6 +2652,7 @@ export async function patchAdminFieldMetadata(req: Request, res: Response) {
     const r = pool.request()
     r.input("id", sql.Int, fieldMetadataId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const sets: string[] = []
     if (body.displayName !== undefined) {
       r.input("displayName", sql.NVarChar(256), body.displayName)
@@ -2460,7 +2700,8 @@ export async function patchAdminFieldMetadata(req: Request, res: Response) {
       const existing = await getFieldMetadataById(
         pool,
         fieldMetadataId,
-        companyId
+        companyId,
+        datasetId
       )
       if (!existing || existing.FieldKind !== "calculated") {
         res.status(400).json({
@@ -2484,12 +2725,12 @@ export async function patchAdminFieldMetadata(req: Request, res: Response) {
     if (sets.length > 0) {
       await r.query(`
         UPDATE dbo.FieldMetadata SET ${sets.join(", ")}
-        WHERE FieldMetadataId = @id AND CompanyId = @companyId
+        WHERE FieldMetadataId = @id AND CompanyId = @companyId AND DatasetId = @datasetId
       `)
     }
     const vt = body.viewTypes ?? body.payerTypes
-    if (vt) await replacePayerTypes(pool, fieldMetadataId, vt)
-    if (body.states) await replaceStates(pool, fieldMetadataId, body.states)
+    if (vt) await replacePayerTypes(pool, datasetId, fieldMetadataId, vt)
+    if (body.states) await replaceStates(pool, datasetId, fieldMetadataId, body.states)
     res.json({ ok: true })
   } catch (error) {
     const message =
@@ -2500,6 +2741,7 @@ export async function patchAdminFieldMetadata(req: Request, res: Response) {
 
 export async function deleteAdminFieldMetadata(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     const companyId = Number(
       req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
@@ -2509,7 +2751,7 @@ export async function deleteAdminFieldMetadata(req: Request, res: Response) {
       return
     }
     const pool = await getTrackingPool()
-    const fm = await getFieldMetadataById(pool, fieldMetadataId, companyId)
+    const fm = await getFieldMetadataById(pool, fieldMetadataId, companyId, datasetId)
     if (!fm) {
       res.status(404).json({ error: "Field not found" })
       return
@@ -2526,10 +2768,11 @@ export async function deleteAdminFieldMetadata(req: Request, res: Response) {
       }
       const cntReq = pool.request()
       cntReq.input("fmid", sql.Int, fieldMetadataId)
+      cntReq.input("datasetId", sql.NVarChar(64), datasetId)
       const cntR = await cntReq.query<{ c: number }>(`
         SELECT COUNT(*) AS c
         FROM dbo.TrackingItemFieldValues
-        WHERE FieldMetadataId = @fmid
+        WHERE FieldMetadataId = @fmid AND DatasetId = @datasetId
       `)
       const stored = Number(cntR.recordset[0]?.c ?? 0)
       if (stored > 0) {
@@ -2542,15 +2785,17 @@ export async function deleteAdminFieldMetadata(req: Request, res: Response) {
     }
     const delTfv = pool.request()
     delTfv.input("fmid", sql.Int, fieldMetadataId)
+    delTfv.input("datasetId", sql.NVarChar(64), datasetId)
     await delTfv.query(`
-      DELETE FROM dbo.TrackingItemFieldValues WHERE FieldMetadataId = @fmid
+      DELETE FROM dbo.TrackingItemFieldValues WHERE FieldMetadataId = @fmid AND DatasetId = @datasetId
     `)
     const delFm = pool.request()
     delFm.input("id", sql.Int, fieldMetadataId)
     delFm.input("companyId", sql.Int, companyId)
+    delFm.input("datasetId", sql.NVarChar(64), datasetId)
     const delResult = await delFm.query(`
       DELETE FROM dbo.FieldMetadata
-      WHERE FieldMetadataId = @id AND CompanyId = @companyId
+      WHERE FieldMetadataId = @id AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     const affected = delResult.rowsAffected?.[0] ?? 0
     if (affected === 0) {
@@ -2567,6 +2812,7 @@ export async function deleteAdminFieldMetadata(req: Request, res: Response) {
 
 export async function getFieldOptions(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     if (!Number.isFinite(fieldMetadataId)) {
       res.status(400).json({ error: "Invalid fieldMetadataId" })
@@ -2575,10 +2821,11 @@ export async function getFieldOptions(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("fieldMetadataId", sql.Int, fieldMetadataId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       SELECT FieldOptionId, OptionValue, OptionLabel, DisplayOrder, IsActive
       FROM dbo.FieldMetadataOption
-      WHERE FieldMetadataId = @fieldMetadataId
+      WHERE FieldMetadataId = @fieldMetadataId AND DatasetId = @datasetId
       ORDER BY DisplayOrder, FieldOptionId
     `)
     const options = result.recordset.map((row: Record<string, unknown>) => ({
@@ -2604,6 +2851,7 @@ const postOptionSchema = z.object({
 
 export async function postFieldOption(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     if (!Number.isFinite(fieldMetadataId)) {
       res.status(400).json({ error: "Invalid fieldMetadataId" })
@@ -2617,13 +2865,14 @@ export async function postFieldOption(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("fieldMetadataId", sql.Int, fieldMetadataId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("optionValue", sql.NVarChar(500), parsed.data.optionValue.trim())
     r.input("optionLabel", sql.NVarChar(500), parsed.data.optionLabel?.trim() ?? null)
     r.input("displayOrder", sql.Int, parsed.data.displayOrder ?? 0)
     const result = await r.query<{ FieldOptionId: number }>(`
-      INSERT INTO dbo.FieldMetadataOption (FieldMetadataId, OptionValue, OptionLabel, DisplayOrder, IsActive)
+      INSERT INTO dbo.FieldMetadataOption (FieldMetadataId, DatasetId, OptionValue, OptionLabel, DisplayOrder, IsActive)
       OUTPUT INSERTED.FieldOptionId
-      VALUES (@fieldMetadataId, @optionValue, @optionLabel, @displayOrder, 1)
+      VALUES (@fieldMetadataId, @datasetId, @optionValue, @optionLabel, @displayOrder, 1)
     `)
     const fieldOptionId = Number(result.recordset[0]?.FieldOptionId)
     if (!fieldOptionId) {
@@ -2640,6 +2889,7 @@ export async function postFieldOption(req: Request, res: Response) {
 
 export async function patchFieldOption(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     const optionId = Number(req.params.optionId)
     if (!Number.isFinite(fieldMetadataId) || !Number.isFinite(optionId)) {
@@ -2656,6 +2906,7 @@ export async function patchFieldOption(req: Request, res: Response) {
     const r = pool.request()
     r.input("optionId", sql.Int, optionId)
     r.input("fieldMetadataId", sql.Int, fieldMetadataId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const updates: string[] = []
     if (body.optionValue !== undefined) {
       const val = body.optionValue?.trim() ?? ""
@@ -2685,7 +2936,7 @@ export async function patchFieldOption(req: Request, res: Response) {
     const result = await r.query(`
       UPDATE dbo.FieldMetadataOption
       SET ${updates.join(", ")}
-      WHERE FieldOptionId = @optionId AND FieldMetadataId = @fieldMetadataId
+      WHERE FieldOptionId = @optionId AND FieldMetadataId = @fieldMetadataId AND DatasetId = @datasetId
     `)
     if (result.rowsAffected[0] === 0) {
       res.status(404).json({ error: "Option not found" })
@@ -2701,6 +2952,7 @@ export async function patchFieldOption(req: Request, res: Response) {
 
 export async function deleteFieldOption(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const fieldMetadataId = Number(req.params.fieldMetadataId)
     const optionId = Number(req.params.optionId)
     if (!Number.isFinite(fieldMetadataId) || !Number.isFinite(optionId)) {
@@ -2711,9 +2963,10 @@ export async function deleteFieldOption(req: Request, res: Response) {
     const r = pool.request()
     r.input("optionId", sql.Int, optionId)
     r.input("fieldMetadataId", sql.Int, fieldMetadataId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       DELETE FROM dbo.FieldMetadataOption
-      WHERE FieldOptionId = @optionId AND FieldMetadataId = @fieldMetadataId
+      WHERE FieldOptionId = @optionId AND FieldMetadataId = @fieldMetadataId AND DatasetId = @datasetId
     `)
     if (result.rowsAffected[0] === 0) {
       res.status(404).json({ error: "Option not found" })
@@ -2729,6 +2982,7 @@ export async function deleteFieldOption(req: Request, res: Response) {
 
 export async function getFieldOrder(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -2744,6 +2998,7 @@ export async function getFieldOrder(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("viewType", sql.NVarChar(100), viewType)
     const sqlText = viewType
       ? `
@@ -2754,8 +3009,9 @@ export async function getFieldOrder(req: Request, res: Response) {
           COALESCE(vto.DisplayOrder, fm.DisplayOrder) AS DisplayOrder
         FROM dbo.FieldMetadata fm
         LEFT JOIN dbo.FieldMetadataViewOrder vto
-          ON vto.FieldMetadataId = fm.FieldMetadataId AND vto.ViewType = @viewType
+          ON vto.FieldMetadataId = fm.FieldMetadataId AND vto.ViewType = @viewType AND vto.DatasetId = @datasetId
         WHERE fm.CompanyId = @companyId
+          AND fm.DatasetId = @datasetId
           AND fm.IsActive = 1
         ORDER BY COALESCE(vto.DisplayOrder, fm.DisplayOrder) ASC, fm.FieldMetadataId ASC
       `
@@ -2767,6 +3023,7 @@ export async function getFieldOrder(req: Request, res: Response) {
           fm.DisplayOrder
         FROM dbo.FieldMetadata fm
         WHERE fm.CompanyId = @companyId
+          AND fm.DatasetId = @datasetId
           AND fm.IsActive = 1
         ORDER BY fm.DisplayOrder ASC, fm.FieldMetadataId ASC
       `
@@ -2797,6 +3054,7 @@ const putFieldOrderSchema = z.object({
 
 export async function putFieldOrder(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const parsed = putFieldOrderSchema.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: "Invalid request body" })
@@ -2810,32 +3068,35 @@ export async function putFieldOrder(req: Request, res: Response) {
         rq.input("id", sql.Int, field.fieldMetadataId)
         rq.input("order", sql.Int, field.displayOrder)
         rq.input("companyId", sql.Int, companyId)
+        rq.input("datasetId", sql.NVarChar(64), datasetId)
         await rq.query(
           `UPDATE dbo.FieldMetadata
            SET DisplayOrder = @order
-           WHERE FieldMetadataId = @id AND CompanyId = @companyId`
+           WHERE FieldMetadataId = @id AND CompanyId = @companyId AND DatasetId = @datasetId`
         )
       }
     } else {
       for (const field of fields) {
         const rq = pool.request()
         rq.input("fieldId", sql.Int, field.fieldMetadataId)
+        rq.input("datasetId", sql.NVarChar(64), datasetId)
         rq.input("viewType", sql.NVarChar(100), viewType)
         rq.input("order", sql.Int, field.displayOrder)
         await rq.query(
           `MERGE INTO dbo.FieldMetadataViewOrder AS target
-           USING (SELECT @fieldId AS FieldMetadataId, @viewType AS ViewType) AS source
-           ON target.FieldMetadataId = source.FieldMetadataId AND target.ViewType = source.ViewType
+           USING (SELECT @fieldId AS FieldMetadataId, @viewType AS ViewType, @datasetId AS DatasetId) AS source
+           ON target.FieldMetadataId = source.FieldMetadataId AND target.ViewType = source.ViewType AND target.DatasetId = source.DatasetId
            WHEN MATCHED THEN
              UPDATE SET DisplayOrder = @order
            WHEN NOT MATCHED THEN
-             INSERT (FieldMetadataId, ViewType, DisplayOrder)
-             VALUES (source.FieldMetadataId, source.ViewType, @order);`
+             INSERT (FieldMetadataId, DatasetId, ViewType, DisplayOrder)
+             VALUES (source.FieldMetadataId, source.DatasetId, source.ViewType, @order);`
         )
       }
       const submittedIds = fields.map((f) => f.fieldMetadataId)
       if (submittedIds.length > 0) {
         const rq = pool.request()
+        rq.input("datasetId", sql.NVarChar(64), datasetId)
         rq.input("viewType", sql.NVarChar(100), viewType)
         const idList = submittedIds.map((_, i) => `@id${i}`).join(",")
         submittedIds.forEach((id, i) => {
@@ -2843,7 +3104,7 @@ export async function putFieldOrder(req: Request, res: Response) {
         })
         await rq.query(
           `DELETE FROM dbo.FieldMetadataViewOrder
-           WHERE ViewType = @viewType AND FieldMetadataId NOT IN (${idList})`
+           WHERE DatasetId = @datasetId AND ViewType = @viewType AND FieldMetadataId NOT IN (${idList})`
         )
       }
     }
@@ -2856,6 +3117,7 @@ export async function putFieldOrder(req: Request, res: Response) {
 
 export async function deleteFieldOrder(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const companyId = numParam(
       req.query as Record<string, unknown>,
       "companyId",
@@ -2872,9 +3134,10 @@ export async function deleteFieldOrder(req: Request, res: Response) {
     }
     const pool = await getTrackingPool()
     const r = pool.request()
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("viewType", sql.NVarChar(100), viewType)
     await r.query(
-      `DELETE FROM dbo.FieldMetadataViewOrder WHERE ViewType = @viewType`
+      `DELETE FROM dbo.FieldMetadataViewOrder WHERE DatasetId = @datasetId AND ViewType = @viewType`
     )
     res.json({ success: true })
   } catch (error) {
@@ -2885,6 +3148,7 @@ export async function deleteFieldOrder(req: Request, res: Response) {
 
 export async function getModalSections(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const companyId = Number(
       req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
     )
@@ -2895,10 +3159,11 @@ export async function getModalSections(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const result = await r.query(`
       SELECT ModalSectionId, SectionName, SectionType, DisplayOrder, IsActive
       FROM dbo.ModalSection
-      WHERE CompanyId = @companyId
+      WHERE CompanyId = @companyId AND DatasetId = @datasetId
       ORDER BY DisplayOrder, ModalSectionId
     `)
     const sections = result.recordset.map((row: Record<string, unknown>) => ({
@@ -2925,6 +3190,7 @@ const postModalSectionSchema = z.object({
 
 export async function postModalSection(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const parsed = postModalSectionSchema.safeParse(req.body)
     if (!parsed.success) {
       res.status(400).json({ error: "companyId, sectionName required" })
@@ -2936,13 +3202,14 @@ export async function postModalSection(req: Request, res: Response) {
     const pool = await getTrackingPool()
     const r = pool.request()
     r.input("companyId", sql.Int, parsed.data.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     r.input("sectionName", sql.NVarChar(128), parsed.data.sectionName.trim())
     r.input("sectionType", sql.NVarChar(50), sectionType)
     r.input("displayOrder", sql.Int, displayOrder)
     const result = await r.query<{ ModalSectionId: number }>(`
-      INSERT INTO dbo.ModalSection (CompanyId, SectionName, SectionType, DisplayOrder)
+      INSERT INTO dbo.ModalSection (CompanyId, DatasetId, SectionName, SectionType, DisplayOrder)
       OUTPUT INSERTED.ModalSectionId
-      VALUES (@companyId, @sectionName, @sectionType, @displayOrder)
+      VALUES (@companyId, @datasetId, @sectionName, @sectionType, @displayOrder)
     `)
     const modalSectionId = Number(result.recordset[0]?.ModalSectionId)
     if (!modalSectionId) {
@@ -2959,6 +3226,7 @@ export async function postModalSection(req: Request, res: Response) {
 
 export async function patchModalSection(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
     const sectionId = Number(req.params.sectionId)
     if (!Number.isFinite(sectionId)) {
       res.status(400).json({ error: "Invalid sectionId" })
@@ -2980,6 +3248,7 @@ export async function patchModalSection(req: Request, res: Response) {
     const r = pool.request()
     r.input("id", sql.Int, sectionId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     const sets: string[] = []
     if (body.sectionName !== undefined) {
       r.input("sectionName", sql.NVarChar(128), body.sectionName.trim())
@@ -3000,7 +3269,7 @@ export async function patchModalSection(req: Request, res: Response) {
     if (sets.length > 0) {
       await r.query(`
         UPDATE dbo.ModalSection SET ${sets.join(", ")}
-        WHERE ModalSectionId = @id AND CompanyId = @companyId
+        WHERE ModalSectionId = @id AND CompanyId = @companyId AND DatasetId = @datasetId
       `)
     }
     res.json({ ok: true })
@@ -3013,6 +3282,7 @@ export async function patchModalSection(req: Request, res: Response) {
 
 export async function deleteModalSection(req: Request, res: Response) {
   try {
+    const datasetId = datasetIdFromRequest(req)
     const sectionId = Number(req.params.sectionId)
     if (!Number.isFinite(sectionId)) {
       res.status(400).json({ error: "Invalid sectionId" })
@@ -3031,15 +3301,332 @@ export async function deleteModalSection(req: Request, res: Response) {
     const r = pool.request()
     r.input("id", sql.Int, sectionId)
     r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
     await r.query(`
       DELETE FROM dbo.ModalSection
-      WHERE ModalSectionId = @id AND CompanyId = @companyId
+      WHERE ModalSectionId = @id AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     res.json({ ok: true })
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Failed to delete section."
     res.status(500).json({ error: message })
+  }
+}
+
+const conditionalRuleSchema = z.object({
+  companyId: z.coerce.number(),
+  datasetId: z.string().min(1).optional(),
+  reportKey: z.string().nullable().optional(),
+  targetFieldKey: z.string().nullable().optional(),
+  applyTo: z.enum(["row", "field"]),
+  backgroundColor: z.string().min(1),
+  textColor: z.string().nullable().optional(),
+  conditionFormula: z.string().min(1).max(4000),
+  conditionTree: z.unknown().optional(),
+  isEnabled: z.boolean().optional(),
+  sortOrder: z.coerce.number().int().optional(),
+})
+
+function ruleFromDbRow(row: Record<string, unknown>) {
+  let parsedTree: ConditionNode | null = null
+  try {
+    if (row.ConditionJson != null) {
+      parsedTree = JSON.parse(String(row.ConditionJson)) as ConditionNode
+    }
+  } catch {
+    parsedTree = null
+  }
+  return {
+    id: String(row.Id),
+    datasetId: String(row.DatasetId),
+    reportKey: row.ReportKey == null ? null : String(row.ReportKey),
+    targetFieldKey:
+      row.TargetFieldKey == null ? null : String(row.TargetFieldKey),
+    applyTo: String(row.ApplyTo).toLowerCase() === "field" ? "field" : "row",
+    backgroundColor: String(row.BackgroundColor),
+    textColor: row.TextColor == null ? null : String(row.TextColor),
+    conditionFormula: String(row.ConditionFormula ?? ""),
+    conditionTree: parsedTree,
+    isEnabled: Boolean(row.IsEnabled),
+    sortOrder: Number(row.SortOrder ?? 0),
+  }
+}
+
+async function ensureConditionalFormattingRulesTable(
+  pool: Awaited<ReturnType<typeof getTrackingPool>>
+) {
+  await pool.request().query(`
+    IF OBJECT_ID(N'dbo.ConditionalFormattingRules', N'U') IS NULL
+    BEGIN
+      CREATE TABLE dbo.ConditionalFormattingRules (
+        Id UNIQUEIDENTIFIER NOT NULL PRIMARY KEY DEFAULT NEWID(),
+        CompanyId INT NOT NULL,
+        DatasetId NVARCHAR(64) NOT NULL,
+        ReportKey NVARCHAR(200) NULL,
+        TargetFieldKey NVARCHAR(200) NULL,
+        ApplyTo NVARCHAR(20) NOT NULL,
+        BackgroundColor NVARCHAR(20) NOT NULL,
+        TextColor NVARCHAR(20) NULL,
+        ConditionFormula NVARCHAR(MAX) NULL,
+        ConditionJson NVARCHAR(MAX) NOT NULL,
+        IsEnabled BIT NOT NULL DEFAULT (1),
+        SortOrder INT NOT NULL DEFAULT (0),
+        CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
+        UpdatedAt DATETIME2 NULL
+      )
+    END
+
+    IF COL_LENGTH(N'dbo.ConditionalFormattingRules', N'ConditionFormula') IS NULL
+    BEGIN
+      ALTER TABLE dbo.ConditionalFormattingRules
+      ADD ConditionFormula NVARCHAR(MAX) NULL
+    END
+  `)
+}
+
+export async function getConditionalFormattingRules(req: Request, res: Response) {
+  try {
+    const companyId = Number(
+      req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
+    )
+    if (!Number.isFinite(companyId)) {
+      res.status(400).json({ error: "companyId required", rules: [] })
+      return
+    }
+    const datasetId = datasetIdFromRequest(req)
+    const reportKey = (req.query.reportKey as string | undefined)?.trim() || null
+    const pool = await getTrackingPool()
+    await ensureConditionalFormattingRulesTable(pool)
+    const r = pool.request()
+    r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
+    r.input("reportKey", sql.NVarChar(200), reportKey)
+    const result = await r.query(`
+      SELECT Id, DatasetId, ReportKey, TargetFieldKey, ApplyTo, BackgroundColor, TextColor, ConditionFormula, ConditionJson, IsEnabled, SortOrder, CreatedAt, UpdatedAt
+      FROM dbo.ConditionalFormattingRules
+      WHERE CompanyId = @companyId
+        AND DatasetId = @datasetId
+        AND (
+          @reportKey IS NULL
+          OR ReportKey IS NULL
+          OR ReportKey = N'ALL'
+          OR ReportKey = @reportKey
+        )
+      ORDER BY SortOrder ASC, CreatedAt ASC
+    `)
+    const rules = result.recordset.flatMap((row: Record<string, unknown>) => {
+      try {
+        return [ruleFromDbRow(row)]
+      } catch {
+        return []
+      }
+    })
+    res.json({ rules })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to load conditional formatting rules."
+    res.status(500).json({ error: message, rules: [] })
+  }
+}
+
+export async function postConditionalFormattingRule(req: Request, res: Response) {
+  try {
+    const parsed = conditionalRuleSchema.safeParse(req.body)
+    if (!parsed.success) {
+      res.status(400).json({ error: "Invalid request body" })
+      return
+    }
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
+    const body = parsed.data
+    if (body.applyTo === "field" && !(body.targetFieldKey?.trim())) {
+      res.status(400).json({ error: "targetFieldKey is required for applyTo=field" })
+      return
+    }
+    let conditionJson: string | null = "{}"
+    if (body.conditionTree !== undefined) {
+      const treeErrors = validateConditionTree(body.conditionTree)
+      if (treeErrors.length > 0) {
+        res.status(400).json({ error: "Invalid conditionTree", details: treeErrors })
+        return
+      }
+      conditionJson = JSON.stringify(body.conditionTree)
+    }
+    const pool = await getTrackingPool()
+    await ensureConditionalFormattingRulesTable(pool)
+    const r = pool.request()
+    r.input("companyId", sql.Int, body.companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
+    r.input("reportKey", sql.NVarChar(200), body.reportKey?.trim() || null)
+    r.input("targetFieldKey", sql.NVarChar(200), body.targetFieldKey?.trim() || null)
+    r.input("applyTo", sql.NVarChar(20), body.applyTo)
+    r.input("backgroundColor", sql.NVarChar(20), body.backgroundColor.trim())
+    r.input("textColor", sql.NVarChar(20), body.textColor?.trim() || null)
+    r.input("conditionFormula", sql.NVarChar(sql.MAX), body.conditionFormula.trim())
+    r.input("conditionJson", sql.NVarChar(sql.MAX), conditionJson)
+    r.input("isEnabled", sql.Bit, body.isEnabled === false ? 0 : 1)
+    r.input("sortOrder", sql.Int, body.sortOrder ?? 0)
+    const ins = await r.query<{ Id: string }>(`
+      INSERT INTO dbo.ConditionalFormattingRules
+        (CompanyId, DatasetId, ReportKey, TargetFieldKey, ApplyTo, BackgroundColor, TextColor, ConditionFormula, ConditionJson, IsEnabled, SortOrder)
+      OUTPUT INSERTED.Id
+      VALUES
+        (@companyId, @datasetId, @reportKey, @targetFieldKey, @applyTo, @backgroundColor, @textColor, @conditionFormula, @conditionJson, @isEnabled, @sortOrder)
+    `)
+    res.json({ ok: true, id: String(ins.recordset[0]?.Id ?? "") })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to create conditional formatting rule."
+    res.status(500).json({ error: message })
+  }
+}
+
+export async function patchConditionalFormattingRule(req: Request, res: Response) {
+  try {
+    const id = (req.params.ruleId ?? "").trim()
+    if (!id) {
+      res.status(400).json({ error: "Invalid ruleId" })
+      return
+    }
+    const body = req.body as Partial<z.infer<typeof conditionalRuleSchema>>
+    const companyId = Number(body.companyId)
+    if (!Number.isFinite(companyId)) {
+      res.status(400).json({ error: "companyId required" })
+      return
+    }
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
+    const pool = await getTrackingPool()
+    await ensureConditionalFormattingRulesTable(pool)
+    const r = pool.request()
+    r.input("id", sql.UniqueIdentifier, id)
+    r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
+    const sets: string[] = []
+    if (body.reportKey !== undefined) {
+      sets.push("ReportKey = @reportKey")
+      r.input("reportKey", sql.NVarChar(200), body.reportKey?.trim() || null)
+    }
+    if (body.targetFieldKey !== undefined) {
+      sets.push("TargetFieldKey = @targetFieldKey")
+      r.input("targetFieldKey", sql.NVarChar(200), body.targetFieldKey?.trim() || null)
+    }
+    if (body.applyTo !== undefined) {
+      sets.push("ApplyTo = @applyTo")
+      r.input("applyTo", sql.NVarChar(20), body.applyTo)
+    }
+    if (body.backgroundColor !== undefined) {
+      sets.push("BackgroundColor = @backgroundColor")
+      r.input("backgroundColor", sql.NVarChar(20), body.backgroundColor.trim())
+    }
+    if (body.textColor !== undefined) {
+      sets.push("TextColor = @textColor")
+      r.input("textColor", sql.NVarChar(20), body.textColor?.trim() || null)
+    }
+    if (body.conditionFormula !== undefined) {
+      sets.push("ConditionFormula = @conditionFormula")
+      r.input("conditionFormula", sql.NVarChar(sql.MAX), body.conditionFormula.trim())
+    }
+    if (body.conditionTree !== undefined) {
+      const treeErrors = validateConditionTree(body.conditionTree)
+      if (treeErrors.length > 0) {
+        res.status(400).json({ error: "Invalid conditionTree", details: treeErrors })
+        return
+      }
+      sets.push("ConditionJson = @conditionJson")
+      r.input("conditionJson", sql.NVarChar(sql.MAX), JSON.stringify(body.conditionTree))
+    }
+    if (body.sortOrder !== undefined) {
+      sets.push("SortOrder = @sortOrder")
+      r.input("sortOrder", sql.Int, Math.trunc(body.sortOrder))
+    }
+    if (body.isEnabled !== undefined) {
+      sets.push("IsEnabled = @isEnabled")
+      r.input("isEnabled", sql.Bit, body.isEnabled ? 1 : 0)
+    }
+    if (sets.length === 0) {
+      res.status(400).json({ error: "Nothing to update" })
+      return
+    }
+    await r.query(`
+      UPDATE dbo.ConditionalFormattingRules
+      SET ${sets.join(", ")}, UpdatedAt = SYSUTCDATETIME()
+      WHERE Id = @id AND CompanyId = @companyId AND DatasetId = @datasetId
+    `)
+    res.json({ ok: true })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to update conditional formatting rule."
+    res.status(500).json({ error: message })
+  }
+}
+
+export async function deleteConditionalFormattingRule(req: Request, res: Response) {
+  try {
+    const id = (req.params.ruleId ?? "").trim()
+    const companyId = Number(
+      req.query.companyId ?? process.env.TRACKING_DEFAULT_COMPANY_ID
+    )
+    if (!id || !Number.isFinite(companyId)) {
+      res.status(400).json({ error: "Invalid params" })
+      return
+    }
+    const datasetId = datasetIdFromRequest(req)
+    const pool = await getTrackingPool()
+    await ensureConditionalFormattingRulesTable(pool)
+    const r = pool.request()
+    r.input("id", sql.UniqueIdentifier, id)
+    r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
+    await r.query(`
+      DELETE FROM dbo.ConditionalFormattingRules
+      WHERE Id = @id AND CompanyId = @companyId AND DatasetId = @datasetId
+    `)
+    res.json({ ok: true })
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "Failed to delete conditional formatting rule."
+    res.status(500).json({ error: message })
+  }
+}
+
+export const getConditionalFormatting = getConditionalFormattingRules
+export const postConditionalFormatting = postConditionalFormattingRule
+
+export async function putConditionalFormatting(req: Request, res: Response) {
+  req.params.ruleId = req.params.id
+  return patchConditionalFormattingRule(req, res)
+}
+
+export async function deleteConditionalFormatting(req: Request, res: Response) {
+  req.params.ruleId = req.params.id
+  return deleteConditionalFormattingRule(req, res)
+}
+
+export async function patchConditionalFormattingEnabled(req: Request, res: Response) {
+  const id = (req.params.id ?? "").trim()
+  const companyId = Number(req.body?.companyId)
+  const isEnabled = Boolean(req.body?.isEnabled)
+  if (!id || !Number.isFinite(companyId)) {
+    res.status(400).json({ error: "Invalid params" })
+    return
+  }
+  try {
+    const datasetId = datasetIdFromRequest(req, req.body as Record<string, unknown>)
+    const pool = await getTrackingPool()
+    await ensureConditionalFormattingRulesTable(pool)
+    const r = pool.request()
+    r.input("id", sql.UniqueIdentifier, id)
+    r.input("companyId", sql.Int, companyId)
+    r.input("datasetId", sql.NVarChar(64), datasetId)
+    r.input("isEnabled", sql.Bit, isEnabled ? 1 : 0)
+    await r.query(`
+      UPDATE dbo.ConditionalFormattingRules
+      SET IsEnabled = @isEnabled, UpdatedAt = SYSUTCDATETIME()
+      WHERE Id = @id AND CompanyId = @companyId AND DatasetId = @datasetId
+    `)
+    res.json({ ok: true })
+  } catch (error) {
+    res.status(500).json({ error: error instanceof Error ? error.message : "Update failed" })
   }
 }
 

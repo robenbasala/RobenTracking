@@ -9,6 +9,7 @@
  */
 import sql from "mssql"
 import { ensureFieldMetadataSchema } from "./ensure-field-metadata-schema"
+import { DEFAULT_DATASET_ID } from "./dataset"
 import { seedFieldMetadataIfDatabaseEmpty } from "./seed-field-metadata"
 
 let pool: sql.ConnectionPool | null = null
@@ -34,6 +35,7 @@ async function ensureActivityTables(p: sql.ConnectionPool): Promise<void> {
        CREATE TABLE dbo.ModalSection (
          ModalSectionId INT IDENTITY(1,1) NOT NULL,
          CompanyId      INT          NOT NULL,
+        DatasetId      NVARCHAR(64) NOT NULL DEFAULT ('${DEFAULT_DATASET_ID}'),
          SectionName    NVARCHAR(128) NOT NULL,
          SectionType    NVARCHAR(50)  NOT NULL DEFAULT (N'Standard'),
          DisplayOrder   INT           NOT NULL DEFAULT (0),
@@ -48,6 +50,7 @@ async function ensureActivityTables(p: sql.ConnectionPool): Promise<void> {
          TaskId         INT IDENTITY(1,1) NOT NULL,
          TrackingItemId INT           NOT NULL,
          CompanyId      INT           NOT NULL,
+        DatasetId      NVARCHAR(64)  NOT NULL DEFAULT ('${DEFAULT_DATASET_ID}'),
          Title          NVARCHAR(256) NOT NULL,
          DueDate        DATE          NULL,
          Status         NVARCHAR(50)  NOT NULL DEFAULT (N'Open'),
@@ -68,6 +71,7 @@ async function ensureActivityTables(p: sql.ConnectionPool): Promise<void> {
          NoteId         INT IDENTITY(1,1) NOT NULL,
          TrackingItemId INT           NOT NULL,
          CompanyId      INT           NOT NULL,
+        DatasetId      NVARCHAR(64)  NOT NULL DEFAULT ('${DEFAULT_DATASET_ID}'),
          NoteType       NVARCHAR(50)  NOT NULL DEFAULT (N'CaseNote'),
          Body           NVARCHAR(MAX) NOT NULL,
          CreatedAt      DATETIME2     NOT NULL DEFAULT SYSUTCDATETIME(),
@@ -84,6 +88,7 @@ async function ensureActivityTables(p: sql.ConnectionPool): Promise<void> {
          EmailId           INT IDENTITY(1,1) NOT NULL,
          TrackingItemId    INT            NOT NULL,
          CompanyId         INT            NOT NULL,
+        DatasetId         NVARCHAR(64)   NOT NULL DEFAULT ('${DEFAULT_DATASET_ID}'),
          Subject           NVARCHAR(500)  NOT NULL,
          Body              NVARCHAR(MAX)  NULL,
          RecipientEmail    NVARCHAR(500)  NOT NULL,
@@ -105,6 +110,7 @@ async function ensureActivityTables(p: sql.ConnectionPool): Promise<void> {
          AttachmentId   INT IDENTITY(1,1) NOT NULL,
          TrackingItemId INT            NOT NULL,
          CompanyId      INT            NOT NULL,
+        DatasetId      NVARCHAR(64)   NOT NULL DEFAULT ('${DEFAULT_DATASET_ID}'),
          FileName       NVARCHAR(500)  NOT NULL,
          ContentType    NVARCHAR(200)  NOT NULL,
          FileSizeBytes  BIGINT         NULL,
@@ -157,6 +163,72 @@ async function runColumnMigrations(p: sql.ConnectionPool): Promise<void> {
     `IF OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
        AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TrackingItemsTbl') AND name = N'IsHotCase')
        EXEC sp_executesql N'ALTER TABLE dbo.TrackingItemsTbl ADD IsHotCase BIT NOT NULL DEFAULT 0'`,
+    // DatasetId columns on core tables (nullable for safe rollout), then backfill.
+    `IF OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TrackingItemsTbl') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.TrackingItemsTbl ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.FieldMetadata', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.FieldMetadata') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.FieldMetadata ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TrackingItemFieldValues') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.TrackingItemFieldValues ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.ResidentTask', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ResidentTask') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.ResidentTask ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.ResidentNote', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ResidentNote') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.ResidentNote ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.ResidentEmail', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ResidentEmail') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.ResidentEmail ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.ResidentAttachment', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ResidentAttachment') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.ResidentAttachment ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.ModalSection', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.ModalSection') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.ModalSection ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataOption', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.FieldMetadataOption') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.FieldMetadataOption ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataPayerType', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.FieldMetadataPayerType') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.FieldMetadataPayerType ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataState', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.FieldMetadataState') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.FieldMetadataState ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataViewOrder', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.FieldMetadataViewOrder') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.FieldMetadataViewOrder ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.PendingFieldDefinition', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.PendingFieldDefinition') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.PendingFieldDefinition ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.PendingFieldOption', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.PendingFieldOption') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.PendingFieldOption ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.PendingFieldValue', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.PendingFieldValue') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.PendingFieldValue ADD DatasetId NVARCHAR(64) NULL'`,
+    `IF OBJECT_ID(N'dbo.TrackingItemStopAudit', N'U') IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'dbo.TrackingItemStopAudit') AND name = N'DatasetId')
+       EXEC sp_executesql N'ALTER TABLE dbo.TrackingItemStopAudit ADD DatasetId NVARCHAR(64) NULL'`,
+    // Backfill to single-tenant dataset for now.
+    `IF OBJECT_ID(N'dbo.TrackingItemsTbl', N'U') IS NOT NULL UPDATE dbo.TrackingItemsTbl SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.FieldMetadata', N'U') IS NOT NULL UPDATE dbo.FieldMetadata SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.TrackingItemFieldValues', N'U') IS NOT NULL UPDATE dbo.TrackingItemFieldValues SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.ResidentTask', N'U') IS NOT NULL UPDATE dbo.ResidentTask SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.ResidentNote', N'U') IS NOT NULL UPDATE dbo.ResidentNote SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.ResidentEmail', N'U') IS NOT NULL UPDATE dbo.ResidentEmail SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.ResidentAttachment', N'U') IS NOT NULL UPDATE dbo.ResidentAttachment SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.ModalSection', N'U') IS NOT NULL UPDATE dbo.ModalSection SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataOption', N'U') IS NOT NULL UPDATE dbo.FieldMetadataOption SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataPayerType', N'U') IS NOT NULL UPDATE dbo.FieldMetadataPayerType SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataState', N'U') IS NOT NULL UPDATE dbo.FieldMetadataState SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.FieldMetadataViewOrder', N'U') IS NOT NULL UPDATE dbo.FieldMetadataViewOrder SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.PendingFieldDefinition', N'U') IS NOT NULL UPDATE dbo.PendingFieldDefinition SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.PendingFieldOption', N'U') IS NOT NULL UPDATE dbo.PendingFieldOption SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.PendingFieldValue', N'U') IS NOT NULL UPDATE dbo.PendingFieldValue SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
+    `IF OBJECT_ID(N'dbo.TrackingItemStopAudit', N'U') IS NOT NULL UPDATE dbo.TrackingItemStopAudit SET DatasetId = '${DEFAULT_DATASET_ID}' WHERE DatasetId IS NULL OR LTRIM(RTRIM(DatasetId)) = N''`,
   ]
 
   for (const stmt of migrations) {

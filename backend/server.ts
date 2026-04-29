@@ -170,6 +170,31 @@ app.get("/api/admin/modal-sections", h.getModalSections)
 app.post("/api/admin/modal-sections", h.postModalSection)
 app.patch("/api/admin/modal-sections/:sectionId", h.patchModalSection)
 app.delete("/api/admin/modal-sections/:sectionId", h.deleteModalSection)
+app.get(
+  "/api/admin/conditional-formatting",
+  h.getConditionalFormattingRules
+)
+app.post(
+  "/api/admin/conditional-formatting",
+  h.postConditionalFormattingRule
+)
+app.patch(
+  "/api/admin/conditional-formatting/:ruleId",
+  h.patchConditionalFormattingRule
+)
+app.delete(
+  "/api/admin/conditional-formatting/:ruleId",
+  h.deleteConditionalFormattingRule
+)
+
+// ---------------------------------------------------------------------------
+// Conditional formatting v2 (recursive condition tree)
+// ---------------------------------------------------------------------------
+app.get("/api/conditional-formatting", h.getConditionalFormatting)
+app.post("/api/conditional-formatting", h.postConditionalFormatting)
+app.put("/api/conditional-formatting/:id", h.putConditionalFormatting)
+app.delete("/api/conditional-formatting/:id", h.deleteConditionalFormatting)
+app.patch("/api/conditional-formatting/:id/enabled", h.patchConditionalFormattingEnabled)
 
 const port = Number(process.env.PORT ?? 3001)
 const server = app.listen(port, () => {

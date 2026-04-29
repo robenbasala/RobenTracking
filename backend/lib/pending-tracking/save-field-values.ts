@@ -14,6 +14,7 @@ function bracketQuoteIdentifier(name: string): string {
 async function loadMetadataForFields(
   pool: ConnectionPool,
   companyId: number,
+  datasetId: string,
   fieldNames: string[]
 ): Promise<Map<string, FieldMetadataRow>> {
   if (fieldNames.length === 0) return new Map()
@@ -23,6 +24,7 @@ async function loadMetadataForFields(
     : ", N'regular' AS FieldKind, CAST(NULL AS nvarchar(max)) AS FormulaDefinitionJson"
   const req = pool.request()
   req.input("companyId", sql.Int, companyId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   const placeholders = fieldNames.map((_, i) => `@n${i}`).join(", ")
   fieldNames.forEach((n, i) => {
     req.input(`n${i}`, sql.NVarChar(128), n)
@@ -34,6 +36,7 @@ async function loadMetadataForFields(
       ${ffCols}
     FROM dbo.FieldMetadata
     WHERE CompanyId = @companyId
+      AND DatasetId = @datasetId
       AND FieldName IN (${placeholders})
   `)
   const map = new Map<string, FieldMetadataRow>()
@@ -61,6 +64,7 @@ async function loadMetadataForFields(
 async function updateBaseColumn(
   pool: ConnectionPool,
   trackingItemId: number,
+  datasetId: string,
   columnName: string,
   dataType: string,
   value: unknown
@@ -69,12 +73,13 @@ async function updateBaseColumn(
   const col = bracketQuoteIdentifier(columnName)
   const req = pool.request()
   req.input("trackingItemId", sql.Int, trackingItemId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   const dt = dataType.toLowerCase()
 
   if (value === null || value === undefined || value === "") {
     await req.query(`
       UPDATE dbo.TrackingItemsTbl SET ${col} = NULL
-      WHERE TrackingItemId = @trackingItemId
+      WHERE TrackingItemId = @trackingItemId AND DatasetId = @datasetId
     `)
     return
   }
@@ -84,6 +89,7 @@ async function updateBaseColumn(
     req.input("v", sql.Date, d && !Number.isNaN(d.getTime()) ? d : null)
     await req.query(`
       UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+        AND DatasetId = @datasetId
     `)
     return
   }
@@ -95,6 +101,7 @@ async function updateBaseColumn(
     req.input("v", sql.Bit, b ? 1 : 0)
     await req.query(`
       UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+        AND DatasetId = @datasetId
     `)
     return
   }
@@ -110,18 +117,21 @@ async function updateBaseColumn(
     req.input("v", sql.Float, Number.isFinite(n) ? n : null)
     await req.query(`
       UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+        AND DatasetId = @datasetId
     `)
     return
   }
   req.input("v", sql.NVarChar(sql.MAX), String(value))
   await req.query(`
     UPDATE dbo.TrackingItemsTbl SET ${col} = @v WHERE TrackingItemId = @trackingItemId
+      AND DatasetId = @datasetId
   `)
 }
 
 async function upsertCustomValue(
   pool: ConnectionPool,
   trackingItemId: number,
+  datasetId: string,
   fieldMetadataId: number,
   dataType: string,
   value: unknown
@@ -129,6 +139,7 @@ async function upsertCustomValue(
   const dt = dataType.toLowerCase()
   const req = pool.request()
   req.input("tid", sql.Int, trackingItemId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   req.input("fmid", sql.Int, fieldMetadataId)
 
   let textVal: string | null = null
@@ -140,12 +151,12 @@ async function upsertCustomValue(
   if (value === null || value === undefined || value === "") {
     await req.query(`
       MERGE dbo.TrackingItemFieldValues AS t
-      USING (SELECT @tid AS TrackingItemId, @fmid AS FieldMetadataId) AS s
-      ON t.TrackingItemId = s.TrackingItemId AND t.FieldMetadataId = s.FieldMetadataId
+      USING (SELECT @tid AS TrackingItemId, @fmid AS FieldMetadataId, @datasetId AS DatasetId) AS s
+      ON t.TrackingItemId = s.TrackingItemId AND t.FieldMetadataId = s.FieldMetadataId AND t.DatasetId = s.DatasetId
       WHEN MATCHED THEN UPDATE SET
         TextValue = NULL, NumberValue = NULL, DateValue = NULL, BooleanValue = NULL, DropdownOptionId = NULL
-      WHEN NOT MATCHED THEN INSERT (TrackingItemId, FieldMetadataId, TextValue, NumberValue, DateValue, BooleanValue, DropdownOptionId)
-      VALUES (@tid, @fmid, NULL, NULL, NULL, NULL, NULL);
+      WHEN NOT MATCHED THEN INSERT (TrackingItemId, DatasetId, FieldMetadataId, TextValue, NumberValue, DateValue, BooleanValue, DropdownOptionId)
+      VALUES (@tid, @datasetId, @fmid, NULL, NULL, NULL, NULL, NULL);
     `)
     return
   }
@@ -187,16 +198,16 @@ async function upsertCustomValue(
 
   await req.query(`
     MERGE dbo.TrackingItemFieldValues AS t
-    USING (SELECT @tid AS TrackingItemId, @fmid AS FieldMetadataId) AS s
-    ON t.TrackingItemId = s.TrackingItemId AND t.FieldMetadataId = s.FieldMetadataId
+    USING (SELECT @tid AS TrackingItemId, @fmid AS FieldMetadataId, @datasetId AS DatasetId) AS s
+    ON t.TrackingItemId = s.TrackingItemId AND t.FieldMetadataId = s.FieldMetadataId AND t.DatasetId = s.DatasetId
     WHEN MATCHED THEN UPDATE SET
       TextValue = @tv,
       NumberValue = @nv,
       DateValue = @dv,
       BooleanValue = @bv,
       DropdownOptionId = @did
-    WHEN NOT MATCHED THEN INSERT (TrackingItemId, FieldMetadataId, TextValue, NumberValue, DateValue, BooleanValue, DropdownOptionId)
-    VALUES (@tid, @fmid, @tv, @nv, @dv, @bv, @did);
+    WHEN NOT MATCHED THEN INSERT (TrackingItemId, DatasetId, FieldMetadataId, TextValue, NumberValue, DateValue, BooleanValue, DropdownOptionId)
+    VALUES (@tid, @datasetId, @fmid, @tv, @nv, @dv, @bv, @did);
   `)
 }
 
@@ -207,12 +218,13 @@ export async function saveTrackingItemFieldValues(
   pool: ConnectionPool,
   trackingItemId: number,
   companyId: number,
+  datasetId: string,
   values: Record<string, unknown>
 ): Promise<{ updated: string[]; skipped: string[] }> {
   // Field names go into parameterized queries in loadMetadataForFields (safe).
   // SourceColumnName (used as a SQL identifier) is validated strictly inside updateBaseColumn.
   const keys = Object.keys(values).filter((k) => k.length > 0 && k.length <= 128)
-  const metaMap = await loadMetadataForFields(pool, companyId, keys)
+  const metaMap = await loadMetadataForFields(pool, companyId, datasetId, keys)
   const updated: string[] = []
   const skipped: string[] = []
 
@@ -239,6 +251,7 @@ export async function saveTrackingItemFieldValues(
       await updateBaseColumn(
         pool,
         trackingItemId,
+        datasetId,
         col,
         fm.DataType,
         values[fieldName]
@@ -248,6 +261,7 @@ export async function saveTrackingItemFieldValues(
       await upsertCustomValue(
         pool,
         trackingItemId,
+        datasetId,
         fm.FieldMetadataId,
         fm.DataType,
         values[fieldName]

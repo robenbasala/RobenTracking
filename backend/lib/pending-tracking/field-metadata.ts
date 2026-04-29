@@ -130,12 +130,13 @@ export async function loadFieldMetadataForScreen(
   pool: ConnectionPool,
   options: {
     companyId: number
+    datasetId: string
     payerType: string
     state: string | null
     screenLocation: typeof SCREEN_MAIN | typeof SCREEN_DETAIL
   }
 ): Promise<FieldMetadataRow[]> {
-  const { companyId, payerType, state, screenLocation } = options
+  const { companyId, datasetId, payerType, state, screenLocation } = options
   const hasMSI = await hasModalSectionIdColumn(pool)
   const msiCol = hasMSI ? ",\n      fm.ModalSectionId" : ",\n      NULL AS ModalSectionId"
   const hasFf = await hasFieldFormulaColumns(pool)
@@ -149,6 +150,7 @@ export async function loadFieldMetadataForScreen(
     LEFT JOIN dbo.FieldMetadataViewOrder vto
       ON vto.FieldMetadataId = fm.FieldMetadataId AND vto.ViewType = @payerType
     WHERE fm.CompanyId = @companyId
+      AND fm.DatasetId = @datasetId
       AND (fm.ScreenLocation = @screenLoc OR fm.ScreenLocation = N'Both')
       AND fm.IsActive = 1
       AND (
@@ -180,6 +182,7 @@ export async function loadFieldMetadataForScreen(
 
   const req = pool.request()
   req.input("companyId", sql.Int, companyId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   req.input("payerType", sql.NVarChar(100), payerType)
   req.input("screenLoc", sql.NVarChar(20), screenLocation)
   const st = state?.trim().toUpperCase().slice(0, 2) ?? ""
@@ -196,7 +199,8 @@ export async function loadFieldMetadataForScreen(
 export async function getFieldMetadataById(
   pool: ConnectionPool,
   fieldMetadataId: number,
-  companyId: number
+  companyId: number,
+  datasetId: string
 ): Promise<FieldMetadataRow | null> {
   const hasMSI = await hasModalSectionIdColumn(pool)
   const msiCol = hasMSI ? ", ModalSectionId" : ", NULL AS ModalSectionId"
@@ -208,6 +212,7 @@ export async function getFieldMetadataById(
   const req = pool.request()
   req.input("id", sql.Int, fieldMetadataId)
   req.input("companyId", sql.Int, companyId)
+  req.input("datasetId", sql.NVarChar(64), datasetId)
   let r: FieldMetadataRow | undefined
   try {
     const result = await req.query<FieldMetadataRow>(`
@@ -216,7 +221,7 @@ export async function getFieldMetadataById(
         IsActive, IsRequired, IsEditable, IsSystemField, SourceType, SourceColumnName
         ${msiCol}${ffCol}
       FROM dbo.FieldMetadata
-      WHERE FieldMetadataId = @id AND CompanyId = @companyId
+      WHERE FieldMetadataId = @id AND CompanyId = @companyId AND DatasetId = @datasetId
     `)
     r = result.recordset[0]
   } catch (e) {

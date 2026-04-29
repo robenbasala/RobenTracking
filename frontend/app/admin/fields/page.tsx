@@ -28,6 +28,9 @@ import { CreateFieldModal } from "./create-field-modal"
 const DEFAULT_COMPANY_ID = Number(
   process.env.NEXT_PUBLIC_TRACKING_DEFAULT_COMPANY_ID ?? "1"
 )
+const DEFAULT_DATASET_ID =
+  process.env.NEXT_PUBLIC_TRACKING_DEFAULT_DATASET_ID ??
+  "4c41eb0d-2fea-4ed7-8de3-224dad8455c6"
 
 const PAGE_SIZE = 10
 
@@ -102,6 +105,7 @@ function compareValues(a: unknown, b: unknown, asc: boolean): number {
 }
 
 export default function AdminFieldsPage() {
+  const [adminTab, setAdminTab] = useState<"fields" | "formatting">("fields")
   const pathname = usePathname()
   const [fields, setFields] = useState<AdminField[]>([])
   const [companyViewTypes, setCompanyViewTypes] = useState<string[]>([])
@@ -129,13 +133,14 @@ export default function AdminFieldsPage() {
   const [sortKey, setSortKey] = useState<SortKey>("displayOrder")
   const [sortAsc, setSortAsc] = useState(true)
   const [page, setPage] = useState(1)
+  const [datasetId, setDatasetId] = useState(DEFAULT_DATASET_ID)
 
   const load = useCallback(async () => {
     setLoading(true)
     setError(null)
     try {
       const res = await apiGet(
-        `/api/admin/field-metadata?companyId=${DEFAULT_COMPANY_ID}`,
+        `/api/admin/field-metadata?companyId=${DEFAULT_COMPANY_ID}&datasetId=${encodeURIComponent(datasetId)}`,
         { cache: "no-store" }
       )
       const data = (await res.json()) as {
@@ -153,7 +158,7 @@ export default function AdminFieldsPage() {
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [datasetId])
 
   useEffect(() => {
     void load()
@@ -176,17 +181,17 @@ export default function AdminFieldsPage() {
       return
     }
     setSelectedViewTypes(new Set(editing.viewTypes))
-    if (editing.dataType.toLowerCase() === "dropdown") {
-      setLoadingOptions(true)
-      apiGet(`/api/admin/field-metadata/${editing.fieldMetadataId}/options`)
+    if (editing.dataType.toLowerCase() !== "dropdown") {
+      setDropdownOptions([])
+      return
+    }
+    setLoadingOptions(true)
+    apiGet(`/api/admin/field-metadata/${editing.fieldMetadataId}/options?datasetId=${encodeURIComponent(datasetId)}`)
         .then(r => r.json())
         .then(data => setDropdownOptions(data.options ?? []))
         .catch(() => setDropdownOptions([]))
         .finally(() => setLoadingOptions(false))
-    } else {
-      setDropdownOptions([])
-    }
-  }, [editing])
+  }, [editing, datasetId])
 
   async function addDropdownOption() {
     if (!editing || !newOptionValue.trim()) return
@@ -194,6 +199,7 @@ export default function AdminFieldsPage() {
       const res = await apiPost(
         `/api/admin/field-metadata/${editing.fieldMetadataId}/options`,
         {
+          datasetId,
           optionValue: newOptionValue.trim(),
           optionLabel: newOptionLabel.trim() || null,
           displayOrder: newOptionOrder,
@@ -205,7 +211,7 @@ export default function AdminFieldsPage() {
       setNewOptionLabel("")
       setNewOptionOrder(0)
       // Reload options
-      const res2 = await apiGet(`/api/admin/field-metadata/${editing.fieldMetadataId}/options`)
+      const res2 = await apiGet(`/api/admin/field-metadata/${editing.fieldMetadataId}/options?datasetId=${encodeURIComponent(datasetId)}`)
       const data2 = await res2.json()
       setDropdownOptions(data2.options ?? [])
     } catch (e) {
@@ -232,7 +238,7 @@ export default function AdminFieldsPage() {
     try {
       const res = await apiPatch(
         `/api/admin/field-metadata/${editing.fieldMetadataId}/options/${optionId}`,
-        { isActive: !isActive }
+        { datasetId, isActive: !isActive }
       )
       if (!res.ok) throw new Error("Update failed")
       setDropdownOptions(opts =>
@@ -333,6 +339,7 @@ export default function AdminFieldsPage() {
       `/api/admin/field-metadata/${editing.fieldMetadataId}`,
       {
         companyId: DEFAULT_COMPANY_ID,
+        datasetId,
         displayName: partial.displayName,
         displayOrder: partial.displayOrder,
         screenLocation: partial.screenLocation,
@@ -376,6 +383,7 @@ export default function AdminFieldsPage() {
     try {
       const res = await apiDelete(
         `/api/admin/field-metadata/${f.fieldMetadataId}?companyId=${DEFAULT_COMPANY_ID}`
+          + `&datasetId=${encodeURIComponent(datasetId)}`
       )
       const data = (await res.json()) as { error?: string }
       if (!res.ok) throw new Error(data.error ?? "Delete failed")
@@ -468,23 +476,20 @@ export default function AdminFieldsPage() {
             href="/"
             className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-blue-300"
           >
-            <MIcon name="pending_actions" /> Pending
+            <MIcon name="pending_actions" /> Tracking
           </Link>
-          <span className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400">
-            <MIcon name="medical_services" /> Medicare
-          </span>
-          <span className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400">
-            <MIcon name="account_balance_wallet" /> Managed Care
-          </span>
-          <span className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400">
-            <MIcon name="history_edu" /> Recertifications
-          </span>
-          <span className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400">
+          <Link
+            href="/tasks"
+            className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-blue-300"
+          >
             <MIcon name="assignment" /> Tasks
-          </span>
-          <span className="flex cursor-not-allowed items-center gap-3 rounded-xl px-3 py-2.5 text-sm text-slate-400">
+          </Link>
+          <Link
+            href="/hot-cases"
+            className="flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-medium text-slate-600 transition-all hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-900 dark:hover:text-blue-300"
+          >
             <MIcon name="priority_high" /> Hot Cases
-          </span>
+          </Link>
         </nav>
         <div className="mt-6 border-t border-slate-200/50 px-3 pt-6 dark:border-slate-800/50">
           <Link
@@ -514,6 +519,44 @@ export default function AdminFieldsPage() {
             Back to dashboard
           </Link>
         </div>
+        <div className="mb-3">
+          <label className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            DatasetId
+          </label>
+          <input
+            className="mt-1 w-[420px] max-w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-mono"
+            value={datasetId}
+            onChange={(e) => setDatasetId(e.target.value)}
+          />
+        </div>
+        <div className="mb-4 inline-flex rounded-xl border border-slate-200 bg-white p-1">
+          <button
+            type="button"
+            onClick={() => setAdminTab("fields")}
+            className={cn(
+              "rounded-lg px-4 py-2 text-sm font-medium",
+              adminTab === "fields"
+                ? "bg-slate-900 font-semibold text-white"
+                : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            Fields management
+          </button>
+          <button
+            type="button"
+            onClick={() => setAdminTab("formatting")}
+            className={cn(
+              "rounded-lg px-4 py-2 text-sm font-medium",
+              adminTab === "formatting"
+                ? "bg-violet-600 font-semibold text-white"
+                : "text-slate-600 hover:bg-slate-50"
+            )}
+          >
+            Conditional formatting
+          </button>
+        </div>
+        {adminTab === "fields" ? (
+        <>
         <div className="mb-8 flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-end">
           <div>
             <nav className="text-on-surface-variant mb-2 flex text-[10px] font-bold uppercase tracking-[0.1em]">
@@ -531,16 +574,7 @@ export default function AdminFieldsPage() {
               both surfaces.
             </p>
           </div>
-          <div className="flex gap-3">
-            <Link href="/admin/fields/order">
-              <Button
-                type="button"
-                className="bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-xl px-6 py-3 font-bold transition-all"
-              >
-                <ArrowUpDown className="mr-2 h-5 w-5" />
-                Reorder Fields
-              </Button>
-            </Link>
+          <div className="flex flex-col items-end gap-3">
             <Button
               type="button"
               className="bg-primary hover:bg-primary-dim shadow-primary/10 active:scale-95 rounded-xl px-6 py-3 font-bold text-on-primary shadow-xl transition-all"
@@ -904,6 +938,17 @@ export default function AdminFieldsPage() {
             </div>
           </>
         )}
+        </>
+        ) : null}
+        {adminTab === "formatting" ? (
+          <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+            <iframe
+              src={`/admin/formatting?embed=1&datasetId=${encodeURIComponent(datasetId)}`}
+              title="Conditional formatting"
+              className="h-[calc(100vh-220px)] w-full"
+            />
+          </div>
+        ) : null}
       </main>
 
       <div className="pointer-events-none fixed -bottom-24 -right-24 -z-10 h-96 w-96 rounded-full bg-primary/5 blur-3xl" />
@@ -1170,6 +1215,7 @@ export default function AdminFieldsPage() {
       {creating && (
         <CreateFieldModal
           companyId={DEFAULT_COMPANY_ID}
+          datasetId={datasetId}
           viewTypeOptions={companyViewTypes}
           existingFields={fields.map((f) => ({
             fieldName: f.fieldName,

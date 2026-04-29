@@ -29,6 +29,20 @@ export type PendingTrackingGridResponse = {
   page: number
   pageSize: number
   defaultSortKey: string
+  formattingRules?: ConditionalFormattingRule[]
+}
+
+export type ConditionalFormattingRule = {
+  id: string
+  reportKey: string | null
+  targetFieldKey: string | null
+  applyTo: "row" | "field"
+  backgroundColor: string
+  textColor?: string | null
+  conditionFormula?: string
+  conditionTree?: Record<string, unknown> | null
+  isEnabled: boolean
+  sortOrder: number
 }
 
 export type DetailDropdownOption = { optionId: number; value: string; label: string }
